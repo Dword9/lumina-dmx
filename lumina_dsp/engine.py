@@ -32,7 +32,7 @@ class AudioEngine:
     - realtime: никаких блокировок в audio callback
     """
 
-    def __init__(self, dsp: DSPConfig | None = None):
+    def __init__(self, dsp: DSPConfig | None = None, ml_cfg: MLClassifierConfig | None = None):
         self.dsp_cfg = dsp or DSPConfig()
 
         self.state = RuntimeState(
@@ -87,7 +87,7 @@ class AudioEngine:
         self._loopback_cached: Optional[Tuple[str, int, int]] = None  # (name, sr, ch)
 
         # --- ML stub cfg ---
-        self._ml_cfg = MLClassifierConfig(enabled=False)
+        self._ml_cfg = ml_cfg or MLClassifierConfig(enabled=False)
 
         # --- ML facade (внутри пока stub) ---
         self._ml = InstrumentClassifier(publish_fn=self._emit_sync, cfg=self._ml_cfg)
