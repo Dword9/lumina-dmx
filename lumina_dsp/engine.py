@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import logging
+import math
 import os
 import platform
 import time
@@ -72,13 +73,21 @@ class AudioEngine:
         self._out_stream: Optional[sd.OutputStream] = None
         self._monitor_enabled: bool = True
         # Чуть больше headroom для аудиомонитора: на коротких лагax ОС буфер
-        # опустевал и в слышимом сигнале появлялись щелчки. 1.8s даёт запас
-        # без изменения контрактов или задержки UI.
-        self._monitor_headroom_sec: float = 1.8
+        # опустевал и в слышимом сигнале появлялись щелчки. Увеличиваем запас
+        # относительно file-player prebuffer (~1.5s), чтобы редкие задержки
+        # чтения/планировщика не выбивали ring-buffer.
+        self._monitor_headroom_sec: float = 2.5
+
+        # Telemetry throttling: heavy JSON serialization of audio_meter over
+        # WebSocket can contend with feeding the monitor ringbuffer. Decimate
+        # meter sends to ~20 Hz (every ~3rd chunk at 60 fps) to ease the GIL.
+        self._meter_decim: int = max(2, int(math.ceil(float(self.dsp_cfg.fps) / 20.0)))
 
         # Realtime monitor ring buffer
         self._mon_rb: Optional[_MonitorRingBuffer] = None
         self._mon_sr: int = 0
+        # Monitor stream prefers stereo for broader device compatibility; mono
+        # sources are upmixed before writing into the ring buffer.
         self._mon_ch: int = 0
 
         # Analysis-only knobs (НЕ влияют на audible output)
@@ -388,21 +397,33 @@ class AudioEngine:
 
         self._close_output_stream()
 
-        self._mon_sr = sr
-        self._mon_ch = ch
+        preferred_ch = 2 if ch == 1 else ch
 
         # IMPORTANT: provide headroom. A bit more than a second reduces underruns.
         cap_frames = max(2048, int(sr * self._monitor_headroom_sec))
-        self._mon_rb = _MonitorRingBuffer(channels=ch, capacity_frames=cap_frames)
 
-        self._out_stream = sd.OutputStream(
-            samplerate=sr,
-            channels=ch,
-            dtype="float32",
-            callback=self._monitor_callback,
-            blocksize=0,
-        )
-        self._out_stream.start()
+        def _open(channels: int) -> None:
+            self._mon_sr = sr
+            self._mon_ch = channels
+            self._mon_rb = _MonitorRingBuffer(channels=channels, capacity_frames=cap_frames)
+            self._out_stream = sd.OutputStream(
+                samplerate=sr,
+                channels=channels,
+                dtype="float32",
+                callback=self._monitor_callback,
+                blocksize=0,
+            )
+            self._out_stream.start()
+
+        try:
+            _open(preferred_ch)
+        except Exception:
+            # Some devices reject mono->stereo upmix; fall back to source channel count.
+            self._out_stream = None
+            self._mon_rb = None
+            self._mon_sr = 0
+            self._mon_ch = 0
+            _open(ch)
 
     def _close_output_stream(self) -> None:
         st = self._out_stream
@@ -437,8 +458,19 @@ class AudioEngine:
             x = np.asarray(chunk, dtype=np.float32)
             if x.ndim == 1:
                 x = x[:, None]
-            if x.ndim != 2 or x.shape[1] != ch:
+
+            mon_ch = self._mon_ch or ch
+            if x.ndim != 2:
                 return
+
+            if x.shape[1] != mon_ch:
+                # Upmix/downmix to match monitor stream (mono->stereo or stereo->mono).
+                if x.shape[1] == 1 and mon_ch == 2:
+                    x = np.repeat(x, 2, axis=1)
+                elif x.shape[1] == 2 and mon_ch == 1:
+                    x = x.mean(axis=1, keepdims=True)
+                else:
+                    return
 
             rb.write(x)  # non-blocking; drops if full
         except Exception:
@@ -572,7 +604,8 @@ class AudioEngine:
             meter = self.dsp_core.compute_meter(x_ana)
 
             now = time.time()
-            if (now - last_send) >= (1.0 / max(10, int(self.dsp_cfg.fps))):
+            meter_interval = (self._meter_decim / max(10, int(self.dsp_cfg.fps)))
+            if (now - last_send) >= meter_interval:
                 await self.emit(
                     {
                         "type": "audio_meter",
@@ -691,9 +724,9 @@ class _MonitorRingBuffer:
         need = int(out.shape[0])
         nread = min(need, can)
         if nread <= 0:
-            # nothing available: keep last sample to avoid hard steps
-            if need > 0:
-                out[:] = self._last
+            # underrun: emit silence to avoid audible spikes
+            out.fill(0)
+            self._last.fill(0)
             return
 
         r0 = self._r % self.capacity
