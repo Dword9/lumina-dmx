@@ -193,7 +193,10 @@ class FilePlayer:
                         t0 = time.perf_counter() - max(0.0, (frames_sent - prebuffer_frames) / float(info.sr))
 
                     # read (ВАЖНО: сразу float32, чтобы не было случайных CPU-спайков на astype)
-                    data = f.read(frames_per_block, dtype="float32", always_2d=True)
+                    # Disk I/O может блокировать event loop, поэтому читаем в thread-пуле.
+                    data = await asyncio.to_thread(
+                        f.read, frames_per_block, dtype="float32", always_2d=True
+                    )
                     if data.size == 0 or len(data) == 0:
                         # EOF -> stop
                         async with self._lock:
