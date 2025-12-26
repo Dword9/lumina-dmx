@@ -65,6 +65,7 @@ class AudioEngine:
         # Output stream (monitor for file playback)
         self._out_stream: Optional[sd.OutputStream] = None
         self._monitor_enabled: bool = True
+        self._monitor_headroom_sec: float = 1.2
 
         # Realtime monitor ring buffer
         self._mon_rb: Optional[_MonitorRingBuffer] = None
@@ -314,8 +315,8 @@ class AudioEngine:
         self._mon_sr = sr
         self._mon_ch = ch
 
-        # IMPORTANT: provide headroom. 0.5s is a good baseline.
-        cap_frames = max(2048, int(sr * 0.5))
+        # IMPORTANT: provide headroom. A bit more than a second reduces underruns.
+        cap_frames = max(2048, int(sr * self._monitor_headroom_sec))
         self._mon_rb = _MonitorRingBuffer(channels=ch, capacity_frames=cap_frames)
 
         self._out_stream = sd.OutputStream(

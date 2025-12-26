@@ -62,8 +62,8 @@ class FilePlayer:
         self._last_status_ts: float = 0.0
 
         # Сколько запаса держим (сек) относительно realtime.
-        # 0.25..0.40 обычно убирает "треск" даже на винде/под нагрузкой.
-        self._prebuffer_sec: float = 0.70
+        # Чуть больше секунды помогает избежать заиканий при нагрузке ОС.
+        self._prebuffer_sec: float = 1.0
 
     async def set_active(self, file_id: str) -> None:
         async with self._lock:
@@ -193,7 +193,10 @@ class FilePlayer:
                         t0 = time.perf_counter() - max(0.0, (frames_sent - prebuffer_frames) / float(info.sr))
 
                     # read (ВАЖНО: сразу float32, чтобы не было случайных CPU-спайков на astype)
-                    data = f.read(frames_per_block, dtype="float32", always_2d=True)
+                    # Disk I/O может блокировать event loop, поэтому читаем в thread-пуле.
+                    data = await asyncio.to_thread(
+                        f.read, frames_per_block, dtype="float32", always_2d=True
+                    )
                     if data.size == 0 or len(data) == 0:
                         # EOF -> stop
                         async with self._lock:
