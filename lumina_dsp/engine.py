@@ -87,7 +87,7 @@ class AudioEngine:
         self._loopback_cached: Optional[Tuple[str, int, int]] = None  # (name, sr, ch)
 
         # --- ML stub cfg ---
-        self._ml_cfg = ml_cfg or MLClassifierConfig(enabled=False)
+        self._ml_cfg = ml_cfg or MLClassifierConfig(enabled=True)
 
         # --- ML facade (внутри пока stub) ---
         self._ml = InstrumentClassifier(publish_fn=self._emit_sync, cfg=self._ml_cfg)
