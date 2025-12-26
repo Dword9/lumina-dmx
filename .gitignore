@@ -6,6 +6,7 @@ __pycache__/
 .venv/
 venv/
 env/
+_uploads/
 
 .idea/
 .vscode/
@@ -15,5 +16,6 @@ Thumbs.db
 
 *.wav
 *.mp3
+*.mp4
 *.onnx
 *.pt
