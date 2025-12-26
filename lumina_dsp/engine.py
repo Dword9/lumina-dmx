@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import ctypes
 import logging
+import math
 import os
 import platform
 import time
@@ -76,6 +77,11 @@ class AudioEngine:
         # относительно file-player prebuffer (~1.5s), чтобы редкие задержки
         # чтения/планировщика не выбивали ring-buffer.
         self._monitor_headroom_sec: float = 2.5
+
+        # Telemetry throttling: heavy JSON serialization of audio_meter over
+        # WebSocket can contend with feeding the monitor ringbuffer. Decimate
+        # meter sends to ~20 Hz (every ~3rd chunk at 60 fps) to ease the GIL.
+        self._meter_decim: int = max(2, int(math.ceil(float(self.dsp_cfg.fps) / 20.0)))
 
         # Realtime monitor ring buffer
         self._mon_rb: Optional[_MonitorRingBuffer] = None
@@ -598,7 +604,8 @@ class AudioEngine:
             meter = self.dsp_core.compute_meter(x_ana)
 
             now = time.time()
-            if (now - last_send) >= (1.0 / max(10, int(self.dsp_cfg.fps))):
+            meter_interval = (self._meter_decim / max(10, int(self.dsp_cfg.fps)))
+            if (now - last_send) >= meter_interval:
                 await self.emit(
                     {
                         "type": "audio_meter",
