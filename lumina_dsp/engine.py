@@ -242,27 +242,64 @@ class AudioEngine:
         extra = WasapiSettings(loopback=True)
         return out_dev, f"{name} (WASAPI loopback)", sr, ch, extra
 
+    def _resolve_loopback_fallback_input(self) -> Tuple[Optional[int], str, int, int]:
+        """
+        Без WASAPI пробуем использовать дефолтный input (например, виртуальный кабель).
+        Не поднимаем исключения, чтобы loopback не рушил остальной поток.
+        """
+        dev = None
+        name = "Desktop Audio (virtual input)"
+        sr = 48000
+        ch = 2
+
+        try:
+            try:
+                dev = sd.default.device[0]
+            except Exception:
+                dev = None
+
+            if dev is not None and int(dev) >= 0:
+                dev = int(dev)
+                info = sd.query_devices(dev)
+                name = str(info.get("name", name) or name)
+                sr = int(info.get("default_samplerate", sr) or sr)
+                ch = max(1, min(2, int(info.get("max_input_channels", ch) or ch)))
+        except Exception:
+            dev = None
+
+        return dev, name, sr, ch
+
+    def _resolve_loopback(self) -> Tuple[Optional[int], str, int, int, Optional[Any]]:
+        try:
+            return self._resolve_loopback_wasapi()
+        except Exception:
+            dev, name, sr, ch = self._resolve_loopback_fallback_input()
+            return dev, name, sr, ch, None
+
     def _open_loopback_stream(self) -> None:
         """
         SourceId: loopback:default (контракт с UI фиксированный!)
         """
         self._close_input_stream()
 
-        dev, name, sr, ch, extra = self._resolve_loopback_wasapi()
+        dev, name, sr, ch, extra = self._resolve_loopback()
         self._loopback_cached = (name, sr, ch)
 
         self.state.sr = int(sr)
         self.state.channels = int(ch)
 
-        self._in_stream = sd.InputStream(
-            device=int(dev),
-            channels=self.state.channels,
-            samplerate=self.state.sr,
-            dtype="float32",
-            callback=self._device_callback,
-            blocksize=0,
-            extra_settings=extra,
-        )
+        kwargs: Dict[str, Any] = {
+            "device": int(dev) if dev is not None else None,
+            "channels": self.state.channels,
+            "samplerate": self.state.sr,
+            "dtype": "float32",
+            "callback": self._device_callback,
+            "blocksize": 0,
+        }
+        if extra is not None:
+            kwargs["extra_settings"] = extra
+
+        self._in_stream = sd.InputStream(**kwargs)
         self._in_stream.start()
 
     def _close_input_stream(self) -> None:
@@ -369,28 +406,32 @@ class AudioEngine:
         items = []
         for i, d in enumerate(devs):
             if int(d.get("max_input_channels", 0) or 0) > 0:
+                name = d.get("name", f"Device {i}") or f"Device {i}"
+                if "ndi" in str(name).lower():
+                    continue
                 items.append(
                     {
                         "id": f"device:{i}",
                         "kind": "device",
-                        "name": d.get("name", f"Device {i}"),
+                        "name": name,
                         "channels": int(d.get("max_input_channels", 1) or 1),
                         "sr": int(d.get("default_samplerate", 48000) or 48000),
                     }
                 )
 
         # loopback:default (контракт фиксирован)
-        lb_name = "Desktop Audio (loopback) [NOT FOUND]"
+        lb_name = "Desktop Audio (loopback)"
         lb_sr = 48000
         lb_ch = 2
         try:
             # обновим кэш, если можем
-            dev, name, sr, ch, extra = self._resolve_loopback_wasapi()
+            dev, name, sr, ch, extra = self._resolve_loopback()
             self._loopback_cached = (name, sr, ch)
             lb_name, lb_sr, lb_ch = name, sr, ch
         except Exception:
-            # остаётся [NOT FOUND] — UI увидит это и будет понятно почему не работает
-            pass
+            cached = self._loopback_cached
+            if cached is not None:
+                lb_name, lb_sr, lb_ch = cached
 
         items.append(
             {
