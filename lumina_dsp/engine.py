@@ -68,7 +68,10 @@ class AudioEngine:
         # Output stream (monitor for file playback)
         self._out_stream: Optional[sd.OutputStream] = None
         self._monitor_enabled: bool = True
-        self._monitor_headroom_sec: float = 1.2
+        # Чуть больше headroom для аудиомонитора: на коротких лагax ОС буфер
+        # опустевал и в слышимом сигнале появлялись щелчки. 1.8s даёт запас
+        # без изменения контрактов или задержки UI.
+        self._monitor_headroom_sec: float = 1.8
 
         # Realtime monitor ring buffer
         self._mon_rb: Optional[_MonitorRingBuffer] = None
