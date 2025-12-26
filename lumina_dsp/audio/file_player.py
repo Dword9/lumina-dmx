@@ -61,21 +61,31 @@ class FilePlayer:
         self._task: Optional[asyncio.Task] = None
         self._last_status_ts: float = 0.0
 
+        # Чтобы убрать щелчки при старте/seek/пауза->play, добавляем короткий fade-in.
+        # Выполняется в asyncio-цикле (не в audio callback), поэтому не грузит realtime.
+        self._fade_sec: float = 0.008  # ~8 ms достаточно, чтобы нивелировать ступеньку
+        self._fade_requested: bool = False
+
         # Сколько запаса держим (сек) относительно realtime.
         # Чуть больше секунды помогает избежать заиканий при нагрузке ОС.
-        self._prebuffer_sec: float = 1.0
+        # Увеличили до 1.5s, чтобы дать чуть больше запаса при чтении больших
+        # файлов/GC/IO-пиках: раньше при кратком лаге ОС monitor ring-buffer
+        # успевал опустеть и было «трещание» на выходе.
+        self._prebuffer_sec: float = 1.5
 
     async def set_active(self, file_id: str) -> None:
         async with self._lock:
             self._active_id = str(file_id)
             self._pos_sec = 0.0
             self._state = "stopped"
+            self._fade_requested = True
 
     async def play(self) -> None:
         async with self._lock:
             if self._active_id is None:
                 raise ValueError("No active file")
             self._state = "playing"
+            self._fade_requested = True
 
     async def pause(self) -> None:
         async with self._lock:
@@ -106,6 +116,7 @@ class FilePlayer:
             if info.duration > 0:
                 sec = min(sec, float(info.duration))
             self._pos_sec = sec
+            self._fade_requested = True
 
     async def get_status_payload(self) -> Dict[str, object]:
         async with self._lock:
@@ -162,6 +173,10 @@ class FilePlayer:
         # чтобы ring-buffer у OutputStream был всегда заполнен и не ловил микролаги.
         prebuffer_frames = int(max(0.0, self._prebuffer_sec) * float(info.sr))
 
+        fade_remaining = int(self._fade_sec * float(info.sr)) if self._fade_requested else 0
+        self._fade_requested = False
+        prev_state: Optional[str] = None
+
         # Виртуальная "точка старта" для расчёта дедлайнов
         # frames_sent = сколько кадров мы уже отдали в on_chunk с начала текущего файла/позиции
         frames_sent = 0
@@ -175,12 +190,16 @@ class FilePlayer:
                     if state == "stopped" or fid_now is None:
                         break
 
+                    if prev_state is not None and prev_state != state and state == "playing":
+                        fade_remaining = int(self._fade_sec * float(info.sr))
+
                     if state == "paused":
                         # при паузе не продвигаем realtime-час
                         await asyncio.sleep(0.02)
                         # чтобы после паузы не пытаться "догнать", пересинхроним t0:
                         # оставим frames_sent как есть, но t0 сдвинем к текущему времени
                         t0 = time.perf_counter() - max(0.0, (frames_sent - prebuffer_frames) / float(info.sr))
+                        prev_state = state
                         continue
 
                     # seek
@@ -191,6 +210,7 @@ class FilePlayer:
                         frames_sent = target_frame
                         # пересинхронизация дедлайна после seek
                         t0 = time.perf_counter() - max(0.0, (frames_sent - prebuffer_frames) / float(info.sr))
+                        fade_remaining = int(self._fade_sec * float(info.sr))
 
                     # read (ВАЖНО: сразу float32, чтобы не было случайных CPU-спайков на astype)
                     # Disk I/O может блокировать event loop, поэтому читаем в thread-пуле.
@@ -211,6 +231,13 @@ class FilePlayer:
                         pad = np.zeros((data.shape[0], ch), dtype=np.float32)
                         pad[:, : data.shape[1]] = data
                         data = pad
+
+                    if fade_remaining > 0:
+                        n_fade = min(len(data), fade_remaining)
+                        if n_fade > 0:
+                            ramp = np.linspace(0.0, 1.0, num=n_fade, endpoint=False, dtype=np.float32)
+                            data[:n_fade] *= ramp[:, None]
+                            fade_remaining -= n_fade
 
                     # callback
                     out = on_chunk(data, info.sr, ch)
@@ -238,6 +265,8 @@ class FilePlayer:
                     else:
                         # если мы отстали (например, ОС лагнула), не делаем "догонялки" через busy loop
                         await asyncio.sleep(0)
+
+                    prev_state = state
 
         except asyncio.CancelledError:
             raise
