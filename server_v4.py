@@ -424,7 +424,14 @@ async def ws_handler(request: web.Request) -> web.WebSocketResponse:
 
             # subscriptions
             if data.get("type") == "subscribe":
-                for s in data.get("payload", {}).get("streams", []):
+                streams = data.get("payload", {}).get("streams", [])
+                if "ai_classifier_event" in streams:
+                    logging.info(
+                        "WS subscribe request for ai_classifier_event: %s",
+                        json.dumps(data, ensure_ascii=False),
+                    )
+
+                for s in streams:
                     SUBS[ws].add(s)
                 await ws.send_str(json.dumps({"type": "ack", "reqId": data.get("reqId")}, ensure_ascii=False))
                 continue
