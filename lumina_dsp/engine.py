@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import threading
 from typing import Any, Dict, Optional, Tuple
@@ -490,6 +491,7 @@ class AudioEngine:
 
     async def _dsp_loop(self) -> None:
         last_send = 0.0
+        ml_log_ts = 0.0
         while not self._closing:
             if not self.state.running:
                 await asyncio.sleep(0.02)
@@ -564,6 +566,13 @@ class AudioEngine:
                 self._ml.enqueue_pcm(mono.astype(np.float32, copy=False))
             except Exception:
                 pass
+
+            if self._ml.enabled and (time.time() - ml_log_ts) >= 5.0:
+                try:
+                    logging.debug("[ML] snapshot %s", self._ml.debug_snapshot())
+                except Exception:
+                    pass
+                ml_log_ts = time.time()
 
 
 class _MonitorRingBuffer:

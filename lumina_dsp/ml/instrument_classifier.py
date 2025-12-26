@@ -1,6 +1,7 @@
 # FILE: v4/lumina_dsp/ml/instrument_classifier.py
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -41,6 +42,7 @@ class InstrumentClassifier:
         self._stop = threading.Event()
         self._th: Optional[threading.Thread] = None
         self._started = False
+        self._log_ts: Dict[str, float] = {}
 
     @property
     def enabled(self) -> bool:
@@ -48,15 +50,8 @@ class InstrumentClassifier:
         return bool(getattr(self.cfg, "enabled", False))
 
     def start(self) -> None:
-        if self._started:
-            return
         self._started = True
-        if not self.enabled:
-            return
-
-        self._stop.clear()
-        self._th = threading.Thread(target=self._run, name="InstrumentClassifier", daemon=True)
-        self._th.start()
+        self.maybe_start_worker()
 
     def shutdown(self) -> None:
         if not self._started:
@@ -79,11 +74,29 @@ class InstrumentClassifier:
         except Exception:
             pass
 
+    def maybe_start_worker(self) -> None:
+        """
+        Ensure worker state follows cfg.enabled without blocking hot paths.
+        """
+        th = self._th
+
+        if not self.enabled:
+            if th is not None and th.is_alive():
+                self._stop.set()
+            return
+
+        if th is None or not th.is_alive():
+            self._stop.clear()
+            self._th = threading.Thread(target=self._run, name="InstrumentClassifier", daemon=True)
+            self._th.start()
+
     def enqueue_pcm(self, pcm_mono_f32: np.ndarray) -> bool:
         """
         Non-blocking ingestion point.
         Сейчас кладём в bounded queue и НЕ делаем inference здесь.
         """
+        self.maybe_start_worker()
+
         if not self.enabled:
             return False
 
@@ -100,6 +113,14 @@ class InstrumentClassifier:
         ok = self._q.put_nowait(pcm_mono_f32)
         self.metrics.mark_enqueue(ok)
 
+        if ok:
+            self._rate_limited_log(
+                "enqueue",
+                logging.DEBUG,
+                "[ML] enqueue ok size=%d/%d",  # args deferred below
+                args=(self._q.qsize(), self._q.maxsize()),
+            )
+
         return ok
 
     # Утилита для будущего runner'а (шаг 3)
@@ -112,19 +133,27 @@ class InstrumentClassifier:
         Worker thread: читает очередь с таймаутом и делает лёгкую евристику по энергии.
         Никаких блокировок/ожиданий на аудио пути.
         """
-        while not self._stop.is_set():
-            frame = self._q.get(timeout=0.1)
-            if frame is None:
-                continue
+        logging.info("[ML] worker started (enabled=%s, qmax=%d)", self.enabled, self._q.maxsize())
+        try:
+            while not self._stop.is_set():
+                frame = self._q.get(timeout=0.1)
+                if frame is None:
+                    self._maybe_log_debug_snapshot()
+                    continue
 
-            try:
-                self._process_frame(frame)
-            except Exception:
-                # ML side-chain не должен влиять на DSP
-                continue
+                try:
+                    self._process_frame(frame)
+                except Exception:
+                    # ML side-chain не должен влиять на DSP
+                    continue
+                self._maybe_log_debug_snapshot()
+        finally:
+            logging.info("[ML] worker exiting")
 
     def _process_frame(self, frame: np.ndarray) -> None:
         if frame.size == 0:
+            return
+        if not self.enabled:
             return
 
         # Лёгкая метрика: RMS энергии
@@ -159,6 +188,13 @@ class InstrumentClassifier:
             # side-chain, не ломаем основной поток
             self.metrics.last_event_ts = now
 
+        self._rate_limited_log(
+            "publish",
+            logging.INFO,
+            "[ML] publish label=%s conf=%0.3f q=%d/%d",  # args deferred below
+            args=(label, confidence, self._q.qsize(), self._q.maxsize()),
+        )
+
     def debug_snapshot(self) -> Dict[str, Any]:
         """
         Для локального логирования/диагностики (UI можно не трогать).
@@ -179,3 +215,33 @@ class InstrumentClassifier:
                 "get_ok": self._q.stats.get_ok,
             },
         }
+
+    def _rate_limited_log(
+        self, key: str, level: int, msg: str, *, args: tuple[Any, ...] | None = None, interval: float = 5.0
+    ) -> None:
+        now = time.time()
+        last = self._log_ts.get(key, 0.0)
+        if (now - last) < interval:
+            return
+        self._log_ts[key] = now
+        try:
+            if args:
+                logging.log(level, msg, *args)
+            else:
+                logging.log(level, msg)
+        except Exception:
+            pass
+
+    def _maybe_log_debug_snapshot(self) -> None:
+        if not self.enabled:
+            return
+        snap = None
+        if (time.time() - self._log_ts.get("diag", 0.0)) >= 5.0:
+            snap = self.debug_snapshot()
+        if snap is None:
+            return
+        self._log_ts["diag"] = time.time()
+        try:
+            logging.debug("[ML] diag %s", snap)
+        except Exception:
+            pass
