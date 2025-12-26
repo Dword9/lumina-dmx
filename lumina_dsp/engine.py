@@ -17,8 +17,10 @@ from .state import RuntimeState, EventCallback
 from .telemetry import emit as telemetry_emit, emit_file_status as telemetry_emit_file_status
 from .control import handle_control as handle_control_router
 
-# ML stub (по умолчанию выключен и не меняет поведение)
-from .ml.instrument_classifier_stub import InstrumentClassifierStub, MLClassifierConfig
+from .ml.instrument_classifier import InstrumentClassifier
+from .ml.instrument_classifier_stub import MLClassifierConfig
+
+
 
 
 class AudioEngine:
@@ -84,10 +86,13 @@ class AudioEngine:
         # loopback cache (optional)
         self._loopback_cached: Optional[Tuple[str, int, int]] = None  # (name, sr, ch)
 
-        # --- ML stub ---
+        # --- ML stub cfg ---
         self._ml_cfg = MLClassifierConfig(enabled=False)
-        self._ml = InstrumentClassifierStub(publish_fn=self._emit_sync, cfg=self._ml_cfg)
+
+        # --- ML facade (внутри пока stub) ---
+        self._ml = InstrumentClassifier(publish_fn=self._emit_sync, cfg=self._ml_cfg)
         self._ml.start()
+
 
     # -------------------- lifecycle --------------------
 
@@ -168,83 +173,71 @@ class AudioEngine:
             x = np.asarray(indata, dtype=np.float32)
             if x.ndim == 1:
                 x = x[:, None]
-            # enforce (frames, ch<=2)
-            ch = min(2, max(1, x.shape[1]))
-            if x.shape[1] > ch:
-                x = x[:, :ch]
-            elif x.shape[1] < ch:
-                pad = np.zeros((x.shape[0], ch), dtype=np.float32)
-                pad[:, : x.shape[1]] = x
-                x = pad
-
-            # Analysis-only gain/gate (must NOT affect audible output)
-            g = float(self._analysis_gain)
-            if g != 1.0:
-                x = x * g
-
-            gate = float(self._gate_rms)
-            if gate > 0.0:
-                rms = float(np.sqrt(np.mean(np.square(x))))
-                if rms < gate:
-                    # below gate -> push zeros to analysis queue
-                    x = np.zeros_like(x)
-
-            self._q_put_nowait(x)
-            # ML non-blocking enqueue
-            try:
-                self._ml.enqueue_audio(x, sr=int(self.state.sr), ch=int(self.state.channels))
-            except Exception:
-                pass
+            if self._loop is not None:
+                self._loop.call_soon_threadsafe(self._q_put_nowait, x)
         except Exception:
             return
 
     def _open_input_stream(self, source_id: str) -> None:
-        """
-        SourceId: device:default OR device:<index> OR device:<name>
-        """
         self._close_input_stream()
 
-        dev = None
-        if source_id == "device:default":
-            dev = None
+        idx_s = source_id.split(":", 1)[1]
+        device = None if idx_s == "default" else int(idx_s)
+
+        if device is not None:
+            info = sd.query_devices(device)
+            sr = int(info.get("default_samplerate", 48000) or 48000)
+            ch = int(info.get("max_input_channels", 1) or 1)
         else:
-            tok = source_id.split(":", 1)[1]
-            try:
-                dev = int(tok)
-            except Exception:
-                # sounddevice accepts name fragments too
-                dev = tok
+            sr = 48000
+            ch = 1
+
+        self.state.sr = int(sr)
+        self.state.channels = int(max(1, min(2, ch)))
 
         self._in_stream = sd.InputStream(
-            device=dev,
-            channels=int(getattr(self.state, "channels", 1)),
-            samplerate=int(getattr(self.state, "sr", 48000)),
+            device=device,
+            channels=self.state.channels,
+            samplerate=self.state.sr,
             dtype="float32",
             callback=self._device_callback,
             blocksize=0,
         )
         self._in_stream.start()
 
-    # -------------------- loopback (Windows WASAPI) --------------------
-
     def _resolve_loopback_wasapi(self) -> Tuple[int, str, int, int, Any]:
         """
-        Tries to find default output device and open WASAPI loopback on it.
-        Returns: (device_index, name, sr, ch, extra_settings)
+        Windows Desktop Audio:
+        Используем WASAPI loopback через sd.WasapiSettings(loopback=True),
+        открывая InputStream на default OUTPUT device.
+
+        Возвращает:
+          (device_index, name, sr, ch, extra_settings)
         """
+        # sounddevice должен иметь WasapiSettings (иначе loopback не поддержан этим билдом)
         WasapiSettings = getattr(sd, "WasapiSettings", None)
         if WasapiSettings is None:
-            raise RuntimeError("WASAPI is not available in sounddevice build")
+            raise RuntimeError("sounddevice.WasapiSettings is not available (WASAPI loopback not supported)")
 
-        out_dev = sd.default.device[1]  # (in, out)
-        if out_dev is None:
-            raise RuntimeError("No default output device for loopback")
+        # default output device index
+        out_dev = None
+        try:
+            out_dev = sd.default.device[1]
+        except Exception:
+            out_dev = None
 
-        info = sd.query_devices(out_dev, "output")
-        name = str(info.get("name", "output"))
-        sr = int(info.get("default_samplerate", 48000))
-        max_out_ch = int(info.get("max_output_channels", 2))
-        ch = int(min(2, max(1, max_out_ch)))
+        if out_dev is None or int(out_dev) < 0:
+            raise RuntimeError("No default output device (needed for WASAPI loopback)")
+
+        out_dev = int(out_dev)
+        out_info = sd.query_devices(out_dev)
+
+        name = str(out_info.get("name", "Desktop Audio") or "Desktop Audio")
+        sr = int(out_info.get("default_samplerate", 48000) or 48000)
+
+        # Для loopback обычно хочется 2 канала
+        max_out_ch = int(out_info.get("max_output_channels", 2) or 2)
+        ch = int(max(1, min(2, max_out_ch)))
 
         extra = WasapiSettings(loopback=True)
         return out_dev, f"{name} (WASAPI loopback)", sr, ch, extra
@@ -345,90 +338,56 @@ class AudioEngine:
             except Exception:
                 pass
 
-    def _monitor_push(self, data: np.ndarray, sr: int, ch: int) -> None:
+    def _monitor_push(self, chunk: np.ndarray, sr: int, ch: int) -> None:
         """
-        Push audio to monitor ring buffer (audible).
-        MUST be non-blocking and safe to call from asyncio loop.
+        Writer: called from asyncio context (file feeder).
+        MUST be non-blocking, and MUST NOT depend on event loop scheduling.
         """
         if not self._monitor_enabled:
             return
-
         try:
-            self._ensure_output_stream(sr=sr, ch=ch)
+            self._ensure_output_stream(sr, ch)
             rb = self._mon_rb
             if rb is None:
                 return
-            rb.write(data)
+
+            x = np.asarray(chunk, dtype=np.float32)
+            if x.ndim == 1:
+                x = x[:, None]
+            if x.ndim != 2 or x.shape[1] != ch:
+                return
+
+            rb.write(x)  # non-blocking; drops if full
         except Exception:
-            return
+            # reset and try again next time
+            self._close_output_stream()
 
-    # -------------------- DSP / sources --------------------
+    # -------------------- sources --------------------
 
-    def set_dsp_params(
-        self,
-        bands: int | None = None,
-        fft_size: int | None = None,
-        block: int | None = None,
-        mock_events: bool | None = None,
-        monitor: bool | None = None,
-        analysis_gain: float | None = None,
-        gate_rms: float | None = None,
-    ) -> None:
-        if bands is not None:
-            self.dsp_core.params.num_bands = int(bands)
-        if fft_size is not None:
-            self.dsp_core.params.fft_size = int(fft_size)
-        if block is not None:
-            self.dsp_core.params.block = int(block)
-        if mock_events is not None:
-            self.dsp_core.params.mock_events = bool(mock_events)
-
-        if monitor is not None:
-            self._monitor_enabled = bool(monitor)
-            if not self._monitor_enabled:
-                self._close_output_stream()
-
-        if analysis_gain is not None:
-            self._analysis_gain = float(analysis_gain)
-
-        if gate_rms is not None:
-            self._gate_rms = float(gate_rms)
-
-    def list_sources(self) -> Dict[str, object]:
+    def list_sources_payload(self) -> Dict[str, Any]:
+        devs = sd.query_devices()
         items = []
-
-        # devices
-        try:
-            devs = sd.query_devices()
-            for i, d in enumerate(devs):
-                # input capable?
-                max_in = int(d.get("max_input_channels", 0))
-                if max_in <= 0:
-                    continue
-                name = str(d.get("name", f"device {i}"))
-                sr = int(d.get("default_samplerate", 48000))
-                ch = int(min(2, max(1, max_in)))
+        for i, d in enumerate(devs):
+            if int(d.get("max_input_channels", 0) or 0) > 0:
                 items.append(
                     {
                         "id": f"device:{i}",
                         "kind": "device",
-                        "name": name,
-                        "channels": ch,
-                        "sr": sr,
+                        "name": d.get("name", f"Device {i}"),
+                        "channels": int(d.get("max_input_channels", 1) or 1),
+                        "sr": int(d.get("default_samplerate", 48000) or 48000),
                     }
                 )
-        except Exception:
-            pass
 
-        # loopback default (optional, Windows)
-        lb_name = "[NOT FOUND]"
+        # loopback:default (контракт фиксирован)
+        lb_name = "Desktop Audio (loopback) [NOT FOUND]"
         lb_sr = 48000
         lb_ch = 2
         try:
-            _, name, sr, ch, _ = self._resolve_loopback_wasapi()
-            lb_name = name
-            lb_sr = sr
-            lb_ch = ch
+            # обновим кэш, если можем
+            dev, name, sr, ch, extra = self._resolve_loopback_wasapi()
+            self._loopback_cached = (name, sr, ch)
+            lb_name, lb_sr, lb_ch = name, sr, ch
         except Exception:
             # остаётся [NOT FOUND] — UI увидит это и будет понятно почему не работает
             pass
@@ -489,17 +448,8 @@ class AudioEngine:
     # -------------------- DSP loop --------------------
 
     async def _dsp_loop(self) -> None:
-        # DEBUG: ML internal counters (not in audio callback)
-        next_ml_dbg = time.time() + 5.0
         last_send = 0.0
         while not self._closing:
-            now = time.time()
-            if now >= next_ml_dbg:
-                try:
-                    print(f"ML DEBUG {time.strftime('%H:%M:%S')} | {self._ml.debug_snapshot()}")
-                except Exception:
-                    pass
-                next_ml_dbg = now + 5.0
             if not self.state.running:
                 await asyncio.sleep(0.02)
                 continue
@@ -512,155 +462,146 @@ class AudioEngine:
                     # 2) dsp queue (analysis)
                     self._q_put_nowait(data)
 
-                await self.file_player.ensure_task(_on_chunk, status_hz=15.0)
+                await self.file_player.ensure_task(_on_chunk)
 
-                if self.file_player.status_should_emit():
-                    await self.emit_file_status()
-
-            # DSP tick
             try:
-                x = self._q.get_nowait()
-            except asyncio.QueueEmpty:
-                await asyncio.sleep(0)
+                x = await asyncio.wait_for(self._q.get(), timeout=0.1)
+            except asyncio.TimeoutError:
                 continue
 
-            meter = self.dsp_core.process(x, sr=int(self.state.sr), ch=int(self.state.channels))
+            if x.dtype != np.float32:
+                x = x.astype(np.float32, copy=False)
+            if not np.isfinite(x).all():
+                x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            x = np.clip(x, -1.0, 1.0)
 
-            # emit audio meter @ fps
+            if self._gate_rms > 0.0:
+                rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
+                if rms < self._gate_rms:
+                    x = np.zeros_like(x)
+
+            x_ana = np.clip(x * float(self._analysis_gain), -1.0, 1.0)
+            meter = self.dsp_core.compute_meter(x_ana)
+
             now = time.time()
-            if now - last_send >= (1.0 / max(1.0, float(self.dsp_core.params.fps))):
+            if (now - last_send) >= (1.0 / max(10, int(self.dsp_cfg.fps))):
+                await self.emit(
+                    {
+                        "type": "audio_meter",
+                        "payload": {
+                            "rms": float(meter.get("rms", 0.0) or 0.0),
+                            "peak": float(meter.get("peak", 0.0) or 0.0),
+                            "bands": meter.get("bands", []) or [],
+                        },
+                        "ts": now,
+                    }
+                )
+
+                bands = meter.get("bands", []) or []
+                low = float(bands[0]) if len(bands) > 0 else 0.0
+                mid = float(bands[len(bands) // 2]) if len(bands) > 1 else 0.0
+                high = float(bands[-1]) if len(bands) > 2 else 0.0
+                await self.emit(
+                    {
+                        "type": "dsp_event",
+                        "payload": {
+                            "kick": float(min(1.0, max(0.0, low * 1.2))),
+                            "snare": float(min(1.0, max(0.0, mid * 1.1))),
+                            "hihat": float(min(1.0, max(0.0, high * 1.0))),
+                            "energy": float(meter.get("rms", 0.0) or 0.0),
+                            "bpm": 0.0,
+                        },
+                        "ts": now,
+                    }
+                )
+
                 last_send = now
-                await self.emit({"type": "audio_meter", "payload": meter})
 
-                if self.dsp_core.params.mock_events:
-                    ev = self.dsp_core.mock_event(meter)
-                    await self.emit({"type": "dsp_event", "payload": ev})
-
-            # ML enqueue (non-blocking, never affects audio callback)
+            # ML stub: enqueue (non-blocking drop)
             try:
-                self._ml.enqueue_audio(x, sr=int(self.state.sr), ch=int(self.state.channels))
+                mono = x_ana.mean(axis=1) if x_ana.ndim == 2 else x_ana.reshape(-1)
+                self._ml.enqueue_pcm(mono.astype(np.float32, copy=False))
             except Exception:
                 pass
 
-    # -------------------- control helpers (called from control.py) --------------------
-
-    async def audio_start(self, fps: int | None = None) -> Dict[str, Any]:
-        if fps is not None:
-            try:
-                self.dsp_core.params.fps = int(fps)
-            except Exception:
-                pass
-        self.state.running = True
-        return {"type": "audio_status", "payload": {"state": "running", "sourceId": self.state.source_id}}
-
-    async def audio_stop(self) -> Dict[str, Any]:
-        self.state.running = False
-        return {"type": "audio_status", "payload": {"state": "stopped", "sourceId": self.state.source_id}}
-
-
-# =========================
-# Minimal ring buffer (monitor)
-# =========================
 
 class _MonitorRingBuffer:
     """
-    Lock-free-ish ring buffer для monitor output.
+    Fast ring buffer for monitor output.
 
-    IMPORTANT:
-    - write() никогда не блокирует
-    - read_into() никогда не блокирует (в callback)
-    - при underrun callback заполняет нулями
+    Writer: asyncio thread (file feeder) calls write(x) — non-blocking, may drop.
+    Reader: sounddevice callback calls read_into(outdata) — non-blocking, fills zeros on underrun.
+
+    CRITICAL: no asyncio primitives here, no create_task, no await.
     """
 
-    def __init__(self, channels: int, capacity_frames: int) -> None:
+    def __init__(self, channels: int, capacity_frames: int):
         self.channels = int(channels)
         self.capacity = int(capacity_frames)
         self._buf = np.zeros((self.capacity, self.channels), dtype=np.float32)
 
-        # Индексы в "frames"
-        self._w = 0  # write index (monotonic)
-        self._r = 0  # read index (monotonic)
-
-        # Лок для write (read в callback без lock)
+        self._w = 0
+        self._r = 0
         self._lock = threading.Lock()
 
-    def available_to_read(self) -> int:
-        # frames available
-        return max(0, int(self._w - self._r))
+    def _available_to_read(self) -> int:
+        return max(0, self._w - self._r)
 
-    def write(self, data: np.ndarray) -> None:
+    def _available_to_write(self) -> int:
+        # keep 1 frame gap
+        return max(0, self.capacity - self._available_to_read() - 1)
+
+    def write(self, x: np.ndarray) -> int:
         """
-        Writes (frames, ch) float32 into ring buffer.
-        Non-blocking: if overflow, drop oldest data.
+        Non-blocking write:
+        - if lock is busy -> drop
+        - if buffer is full -> drop excess
         """
-        if data is None:
-            return
-        x = np.asarray(data, dtype=np.float32)
-        if x.ndim == 1:
-            x = x[:, None]
-        if x.shape[1] != self.channels:
-            # reshape/pad/truncate to channels
-            ch = self.channels
-            if x.shape[1] > ch:
-                x = x[:, :ch]
-            else:
-                pad = np.zeros((x.shape[0], ch), dtype=np.float32)
-                pad[:, : x.shape[1]] = x
-                x = pad
+        if x.ndim != 2 or x.shape[1] != self.channels:
+            return 0
 
-        n = int(x.shape[0])
-        if n <= 0:
-            return
-
-        with self._lock:
-            # If overflow, advance read pointer to keep last capacity frames
-            avail = self.available_to_read()
-            if avail + n > self.capacity:
-                drop = (avail + n) - self.capacity
-                self._r += int(drop)
+        if not self._lock.acquire(blocking=False):
+            return 0
+        try:
+            n = int(x.shape[0])
+            can = self._available_to_write()
+            if can <= 0 or n <= 0:
+                return 0
+            nwrite = min(n, can)
 
             w0 = self._w % self.capacity
-            end = w0 + n
-            if end <= self.capacity:
-                self._buf[w0:end, :] = x
-            else:
-                n1 = self.capacity - w0
-                self._buf[w0:self.capacity, :] = x[:n1, :]
-                n2 = n - n1
-                self._buf[0:n2, :] = x[n1:n1 + n2, :]
+            first = min(nwrite, self.capacity - w0)
+            self._buf[w0 : w0 + first] = x[:first]
+            remain = nwrite - first
+            if remain > 0:
+                self._buf[0:remain] = x[first : first + remain]
 
-            self._w += n
+            self._w += nwrite
+            return nwrite
+        finally:
+            self._lock.release()
 
     def read_into(self, out: np.ndarray) -> None:
         """
-        Reads into out (frames, ch). If underrun, fills zeros.
-        MUST be fast and safe to call from audio callback.
+        Fill out with available frames, rest zeros.
+        Must be fast for audio callback.
         """
-        if out is None:
+        try:
+            out.fill(0)
+        except Exception:
             return
 
-        outdata = out
-        outdata.fill(0)
-
-        n = int(outdata.shape[0])
-        if n <= 0:
+        can = self._available_to_read()
+        need = int(out.shape[0])
+        nread = min(need, can)
+        if nread <= 0:
             return
 
-        # Optimistic read without lock: tolerate minor races; correctness not perfect but safe.
-        avail = self.available_to_read()
-        if avail <= 0:
-            return
-
-        nread = min(n, avail)
         r0 = self._r % self.capacity
-        end = r0 + nread
-        if end <= self.capacity:
-            outdata[:nread, :] = self._buf[r0:end, :]
-        else:
-            n1 = self.capacity - r0
-            outdata[:n1, :] = self._buf[r0:self.capacity, :]
-            remain = nread - n1
-            if remain > 0:
-                outdata[n1:n1 + remain, :] = self._buf[0:remain, :]
+        first = min(nread, self.capacity - r0)
+        out[:first] = self._buf[r0 : r0 + first]
+        remain = nread - first
+        if remain > 0:
+            out[first : first + remain] = self._buf[0:remain]
 
         self._r += nread
