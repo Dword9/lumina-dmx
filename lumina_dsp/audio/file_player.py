@@ -62,8 +62,8 @@ class FilePlayer:
         self._last_status_ts: float = 0.0
 
         # Сколько запаса держим (сек) относительно realtime.
-        # 0.25..0.40 обычно убирает "треск" даже на винде/под нагрузкой.
-        self._prebuffer_sec: float = 0.70
+        # Чуть больше секунды помогает избежать заиканий при нагрузке ОС.
+        self._prebuffer_sec: float = 1.0
 
     async def set_active(self, file_id: str) -> None:
         async with self._lock:
