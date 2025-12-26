@@ -63,7 +63,10 @@ class FilePlayer:
 
         # Сколько запаса держим (сек) относительно realtime.
         # Чуть больше секунды помогает избежать заиканий при нагрузке ОС.
-        self._prebuffer_sec: float = 1.0
+        # Увеличили до 1.5s, чтобы дать чуть больше запаса при чтении больших
+        # файлов/GC/IO-пиках: раньше при кратком лаге ОС monitor ring-buffer
+        # успевал опустеть и было «трещание» на выходе.
+        self._prebuffer_sec: float = 1.5
 
     async def set_active(self, file_id: str) -> None:
         async with self._lock:
