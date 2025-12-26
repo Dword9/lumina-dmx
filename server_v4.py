@@ -250,6 +250,7 @@ async def sender_loop(app: web.Application):
 # ================== WS SUBS ==================
 UI_CLIENTS: Set[web.WebSocketResponse] = set()
 SUBS: Dict[web.WebSocketResponse, Set[str]] = {}
+_AI_TX_LOG_TS = 0.0
 
 
 def is_subscribed(ws: web.WebSocketResponse, stream: str) -> bool:
@@ -259,16 +260,31 @@ def is_subscribed(ws: web.WebSocketResponse, stream: str) -> bool:
 async def broadcast(app: web.Application, stream: str, msg: Dict[str, Any]) -> None:
     raw = json.dumps(msg, ensure_ascii=False)
     dead = []
+    sent = 0
     for ws in UI_CLIENTS:
         if not is_subscribed(ws, stream):
             continue
         try:
             await ws.send_str(raw)
+            sent += 1
         except Exception:
             dead.append(ws)
     for ws in dead:
         UI_CLIENTS.discard(ws)
         SUBS.pop(ws, None)
+
+    if stream == "ai_classifier_event" and sent:
+        global _AI_TX_LOG_TS
+        now = time.time()
+        if (now - _AI_TX_LOG_TS) >= 5.0:
+            payload = msg.get("payload", {}) or {}
+            logging.info(
+                "[WS] tx ai_classifier_event to %d subscribed clients (label=%s, conf=%s)",
+                sent,
+                payload.get("label"),
+                payload.get("confidence"),
+            )
+            _AI_TX_LOG_TS = now
 
 
 def analyzer_event_cb(app: web.Application):
