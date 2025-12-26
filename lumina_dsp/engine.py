@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import logging
+import os
+import platform
 import time
 import threading
 from typing import Any, Dict, Optional, Tuple
@@ -68,7 +71,10 @@ class AudioEngine:
         # Output stream (monitor for file playback)
         self._out_stream: Optional[sd.OutputStream] = None
         self._monitor_enabled: bool = True
-        self._monitor_headroom_sec: float = 1.2
+        # Чуть больше headroom для аудиомонитора: на коротких лагax ОС буфер
+        # опустевал и в слышимом сигнале появлялись щелчки. 1.8s даёт запас
+        # без изменения контрактов или задержки UI.
+        self._monitor_headroom_sec: float = 1.8
 
         # Realtime monitor ring buffer
         self._mon_rb: Optional[_MonitorRingBuffer] = None
@@ -94,6 +100,10 @@ class AudioEngine:
         self._ml = InstrumentClassifier(publish_fn=self._emit_sync, cfg=self._ml_cfg)
         self._ml.start()
 
+        # One-time best-effort boost: приоритет процесса повыше, чтобы frontend
+        # или сторонние heavy-потоки не отбирали квант у аудио-потоков PortAudio.
+        self._priority_boosted: bool = False
+
 
     # -------------------- lifecycle --------------------
 
@@ -102,6 +112,7 @@ class AudioEngine:
 
     async def start(self) -> None:
         self._loop = asyncio.get_running_loop()
+        self._boost_process_priority()
         if self._dsp_task is None or self._dsp_task.done():
             self._dsp_task = asyncio.create_task(self._dsp_loop(), name="lumina.dsp_loop")
 
@@ -165,6 +176,40 @@ class AudioEngine:
             while True:
                 self._q.get_nowait()
         except asyncio.QueueEmpty:
+            pass
+
+    def _boost_process_priority(self) -> None:
+        """
+        Best-effort: поднять приоритет процесса, чтобы проигрыватель/PortAudio
+        реже вытеснялись тяжёлыми потоками (например, от UI).
+        Делаем один раз и без исключений — стабильность аудио важнее.
+        """
+
+        if self._priority_boosted:
+            return
+
+        self._priority_boosted = True
+
+        try:
+            # Windows: HIGH_PRIORITY_CLASS (0x00000080)
+            if platform.system().lower().startswith("win"):
+                handle = ctypes.windll.kernel32.GetCurrentProcess()
+                ctypes.windll.kernel32.SetPriorityClass(handle, 0x00000080)
+                return
+
+            # POSIX: снизим nice (более высокий приоритет -> меньше значение)
+            if hasattr(os, "nice"):
+                try:
+                    current = os.nice(0)
+                except Exception:
+                    current = None
+                try:
+                    if current is None or current > -5:
+                        os.nice(-5)
+                except Exception:
+                    pass
+        except Exception:
+            # Не ломаем поток аудио — если не удалось, просто продолжаем.
             pass
 
     # -------------------- input device I/O --------------------
@@ -593,6 +638,7 @@ class _MonitorRingBuffer:
         self._w = 0
         self._r = 0
         self._lock = threading.Lock()
+        self._last = np.zeros((1, self.channels), dtype=np.float32)
 
     def _available_to_read(self) -> int:
         return max(0, self._w - self._r)
@@ -645,6 +691,9 @@ class _MonitorRingBuffer:
         need = int(out.shape[0])
         nread = min(need, can)
         if nread <= 0:
+            # nothing available: keep last sample to avoid hard steps
+            if need > 0:
+                out[:] = self._last
             return
 
         r0 = self._r % self.capacity
@@ -655,3 +704,15 @@ class _MonitorRingBuffer:
             out[first : first + remain] = self._buf[0:remain]
 
         self._r += nread
+
+        # remember tail to soften underruns; fade remaining zeros toward silence
+        try:
+            self._last[:] = out[nread - 1 : nread]
+            if nread < need:
+                tail = need - nread
+                fade = np.linspace(1.0, 0.0, num=tail, endpoint=False, dtype=np.float32)[
+                    :, None
+                ]
+                out[nread:] = self._last * fade
+        except Exception:
+            pass
