@@ -45,6 +45,19 @@ class DropQueue(Generic[T]):
         except queue.Empty:
             return None
 
+    def get(self, timeout: float | None = None) -> Optional[T]:
+        """
+        Blocking get with timeout to avoid busy loops in worker threads.
+
+        Returns None if queue is empty after timeout.
+        """
+        try:
+            item = self._q.get(timeout=timeout)
+            self.stats.get_ok += 1
+            return item
+        except queue.Empty:
+            return None
+
     def qsize(self) -> int:
         return self._q.qsize()
 
