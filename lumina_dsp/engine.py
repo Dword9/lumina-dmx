@@ -692,9 +692,9 @@ class _MonitorRingBuffer:
         need = int(out.shape[0])
         nread = min(need, can)
         if nread <= 0:
-            # nothing available: keep last sample to avoid hard steps
-            if need > 0:
-                out[:] = self._last
+            # underrun: emit silence to avoid audible spikes
+            out.fill(0)
+            self._last.fill(0)
             return
 
         r0 = self._r % self.capacity
