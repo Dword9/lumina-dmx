@@ -80,6 +80,8 @@ class AudioEngine:
         # Realtime monitor ring buffer
         self._mon_rb: Optional[_MonitorRingBuffer] = None
         self._mon_sr: int = 0
+        # Monitor stream prefers stereo for broader device compatibility; mono
+        # sources are upmixed before writing into the ring buffer.
         self._mon_ch: int = 0
 
         # Analysis-only knobs (НЕ влияют на audible output)
@@ -389,21 +391,33 @@ class AudioEngine:
 
         self._close_output_stream()
 
-        self._mon_sr = sr
-        self._mon_ch = ch
+        preferred_ch = 2 if ch == 1 else ch
 
         # IMPORTANT: provide headroom. A bit more than a second reduces underruns.
         cap_frames = max(2048, int(sr * self._monitor_headroom_sec))
-        self._mon_rb = _MonitorRingBuffer(channels=ch, capacity_frames=cap_frames)
 
-        self._out_stream = sd.OutputStream(
-            samplerate=sr,
-            channels=ch,
-            dtype="float32",
-            callback=self._monitor_callback,
-            blocksize=0,
-        )
-        self._out_stream.start()
+        def _open(channels: int) -> None:
+            self._mon_sr = sr
+            self._mon_ch = channels
+            self._mon_rb = _MonitorRingBuffer(channels=channels, capacity_frames=cap_frames)
+            self._out_stream = sd.OutputStream(
+                samplerate=sr,
+                channels=channels,
+                dtype="float32",
+                callback=self._monitor_callback,
+                blocksize=0,
+            )
+            self._out_stream.start()
+
+        try:
+            _open(preferred_ch)
+        except Exception:
+            # Some devices reject mono->stereo upmix; fall back to source channel count.
+            self._out_stream = None
+            self._mon_rb = None
+            self._mon_sr = 0
+            self._mon_ch = 0
+            _open(ch)
 
     def _close_output_stream(self) -> None:
         st = self._out_stream
@@ -438,8 +452,19 @@ class AudioEngine:
             x = np.asarray(chunk, dtype=np.float32)
             if x.ndim == 1:
                 x = x[:, None]
-            if x.ndim != 2 or x.shape[1] != ch:
+
+            mon_ch = self._mon_ch or ch
+            if x.ndim != 2:
                 return
+
+            if x.shape[1] != mon_ch:
+                # Upmix/downmix to match monitor stream (mono->stereo or stereo->mono).
+                if x.shape[1] == 1 and mon_ch == 2:
+                    x = np.repeat(x, 2, axis=1)
+                elif x.shape[1] == 2 and mon_ch == 1:
+                    x = x.mean(axis=1, keepdims=True)
+                else:
+                    return
 
             rb.write(x)  # non-blocking; drops if full
         except Exception:
