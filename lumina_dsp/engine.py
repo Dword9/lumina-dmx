@@ -68,7 +68,10 @@ class AudioEngine:
         # Output stream (monitor for file playback)
         self._out_stream: Optional[sd.OutputStream] = None
         self._monitor_enabled: bool = True
-        self._monitor_headroom_sec: float = 1.2
+        # Чуть больше headroom для аудиомонитора: на коротких лагax ОС буфер
+        # опустевал и в слышимом сигнале появлялись щелчки. 1.8s даёт запас
+        # без изменения контрактов или задержки UI.
+        self._monitor_headroom_sec: float = 1.8
 
         # Realtime monitor ring buffer
         self._mon_rb: Optional[_MonitorRingBuffer] = None
@@ -593,6 +596,7 @@ class _MonitorRingBuffer:
         self._w = 0
         self._r = 0
         self._lock = threading.Lock()
+        self._last = np.zeros((1, self.channels), dtype=np.float32)
 
     def _available_to_read(self) -> int:
         return max(0, self._w - self._r)
@@ -645,6 +649,9 @@ class _MonitorRingBuffer:
         need = int(out.shape[0])
         nread = min(need, can)
         if nread <= 0:
+            # nothing available: keep last sample to avoid hard steps
+            if need > 0:
+                out[:] = self._last
             return
 
         r0 = self._r % self.capacity
@@ -655,3 +662,15 @@ class _MonitorRingBuffer:
             out[first : first + remain] = self._buf[0:remain]
 
         self._r += nread
+
+        # remember tail to soften underruns; fade remaining zeros toward silence
+        try:
+            self._last[:] = out[nread - 1 : nread]
+            if nread < need:
+                tail = need - nread
+                fade = np.linspace(1.0, 0.0, num=tail, endpoint=False, dtype=np.float32)[
+                    :, None
+                ]
+                out[nread:] = self._last * fade
+        except Exception:
+            pass
