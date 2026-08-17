@@ -87,7 +87,7 @@ export function stagePreset(): StagePreset {
     name: f.name,
   }));
   const groups = [...new Set(fixtures.map(f => f.group))].sort((a, b) => a - b);
-  return { id: 'stage', name: 'Stage', builtin: true, fixtures, groups, stacks: [] };
+  return { id: 'stage', name: 'ККЗ 17.08.26', builtin: true, fixtures, groups, stacks: [] };
 }
 
 export function defaultStagePresets(): StagePreset[] {
@@ -100,12 +100,14 @@ export function loadStagePresets(): StagePreset[] {
   return [...builtin, ...loadCustom()];
 }
 
-export function saveStagePreset(preset: StagePreset) {
+export function saveStagePreset(preset: StagePreset): StagePreset {
   const hidden = loadHidden();
   const next = loadCustom().filter(p => p.id !== preset.id && !hidden.has(p.id));
-  next.push({ ...preset, id: isBuiltin(preset.id) ? `${slug(preset.name)}-${Date.now()}` : preset.id, builtin: false });
+  const saved: StagePreset = { ...preset, id: isBuiltin(preset.id) ? `${slug(preset.name)}-${Date.now()}` : preset.id, builtin: false };
+  next.push(saved);
   localStorage.setItem(PATCHES_KEY, JSON.stringify(next));
   localStorage.setItem(LAST_NAME_KEY, preset.name);
+  return saved;
 }
 
 export function removeStagePreset(id: string) {
@@ -123,5 +125,5 @@ export function suggestNextName(): string {
   const prev = localStorage.getItem(LAST_NAME_KEY) || '';
   const m = /^(.*?)(\d+)$/.exec(prev);
   if (m) return `${m[1]}${Number(m[2]) + 1}`;
-  return prev ? `${prev} 2` : 'Stage';
+  return prev ? `${prev} 2` : 'ККЗ 17.08.26';
 }

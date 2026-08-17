@@ -122,7 +122,6 @@ function computeConflicts(draft: DraftFixture[], stacks: string[][]): Set<string
 
 const UniversePane: React.FC<{
   title: string;
-  subtitle: string;
   universe: 1 | 2;
   fixtures: DraftFixture[];
   sel: Set<string>;
@@ -132,9 +131,11 @@ const UniversePane: React.FC<{
   onBarPointerDown: (e: React.PointerEvent, f: DraftFixture) => void;
   onBarClick: (e: React.MouseEvent, f: DraftFixture) => void;
   onDropProfile: (profileId: string, ch: number, universe: 1 | 2) => void;
-}> = ({ title, subtitle, universe, fixtures, sel, focusGroup, stacked, conflicts, onBarPointerDown, onBarClick, onDropProfile }) => {
+}> = ({ title, universe, fixtures, sel, focusGroup, stacked, conflicts, onBarPointerDown, onBarClick, onDropProfile }) => {
   const stripRef = useRef<HTMLDivElement>(null);
   const [dropCh, setDropCh] = useState<number | null>(null);
+  const chanCount = fixtures.reduce((a, f) => a + f.len, 0);
+  const confCount = fixtures.filter(f => conflicts.has(f.uid) && !stacked.has(f.uid)).length;
 
   const offsets = useMemo(() => {
     const map: Record<string, number> = {};
@@ -170,8 +171,11 @@ const UniversePane: React.FC<{
   return (
     <div className="flex-1 min-w-0">
       <div className="flex items-baseline justify-between mb-0.5 px-0.5">
-        <span className="text-[9px] font-black uppercase tracking-wider" style={{ color: universe === 2 ? '#22d3ee' : '#10b981' }}>{title}</span>
-        <span className="text-[8px] text-zinc-600">{subtitle}</span>
+        <span className="text-[10px] font-black tracking-wider" style={{ color: universe === 2 ? '#22d3ee' : '#10b981' }}>{title}</span>
+        <span className="text-[8px] text-zinc-500">
+          приборов {fixtures.length} · каналов {chanCount}
+          {confCount > 0 && <span className="text-red-500"> · конфликтов {confCount}</span>}
+        </span>
       </div>
       <div className="nodrag nopan overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950"
         style={{ maxWidth: '100%' }}
@@ -258,6 +262,12 @@ export const PatchNode = ({ data, id, selected }: any) => {
 
   const [bank, setBank] = useState<FixtureProfile[]>(() => loadFixtureBank());
   const [presets, setPresets] = useState<StagePreset[]>(() => loadStagePresets());
+  const [currentStageId, setCurrentStageId] = useState<string>(() => {
+    const p = loadStagePresets();
+    const last = localStorage.getItem('lumina-last-patch-name');
+    const hit = last ? p.find(x => x.name === last) : undefined;
+    return hit ? hit.id : (p.find(x => x.id === 'stage') || p[0])?.id || '';
+  });
   const [draft, setDraft] = useState<DraftFixture[]>(() => (graphNodes || []).filter((n: any) => n.type === 'fixture').map(toDraft));
   const [groups, setGroupsState] = useState<number[]>(() => Array.isArray(params.groups) ? params.groups : []);
   const [stacks, setStacks] = useState<string[][]>(() => Array.isArray(params.stacks) ? params.stacks : []);
@@ -273,8 +283,6 @@ export const PatchNode = ({ data, id, selected }: any) => {
 
   const conflicts = useMemo(() => computeConflicts(draft, stacks), [draft, stacks]);
   const stacked = useMemo(() => new Set<string>(stacks.flat()), [stacks]);
-  const usedChannels = draft.reduce((a, f) => a + f.len, 0);
-  const conflictCount = draft.filter(f => conflicts.has(f.uid) && !stacked.has(f.uid)).length;
 
   // --- Undo-стек всех шагов -------------------------------------------------
   const pushSnapshot = (label: string) => {
@@ -487,14 +495,23 @@ export const PatchNode = ({ data, id, selected }: any) => {
     setStacks(preset.stacks.map(s => s.map(i => uids[i])));
     setSel(new Set());
     setFocusGroup(null);
-    debugLog.log('patch', `preset-load "${preset.name}" n=${loaded.length}`);
+    setCurrentStageId(preset.id);
+    debugLog.log('patch', `stage-load "${preset.name}" n=${loaded.length}`);
   };
 
-  const deletePreset = (preset: StagePreset) => {
-    if (!window.confirm(`Удалить патч «${preset.name}»?`)) return;
+  const deleteCurrentStage = () => {
+    const preset = presets.find(p => p.id === currentStageId);
+    if (!preset) return;
+    if (!window.confirm(`Удалить Stage «${preset.name}»?`)) return;
     removeStagePreset(preset.id);
     setPresets(loadStagePresets());
-    debugLog.log('patch', `preset-delete "${preset.name}" (builtin=${preset.builtin})`);
+    const next = loadStagePresets();
+    setCurrentStageId(next[0]?.id || '');
+    setDraft([]);
+    setGroupsState([]);
+    setStacks([]);
+    setSel(new Set());
+    debugLog.log('patch', `stage-delete "${preset.name}" (builtin=${preset.builtin})`);
   };
 
   const openApply = () => {
@@ -555,7 +572,8 @@ export const PatchNode = ({ data, id, selected }: any) => {
       groups: [...groups],
       stacks: stacks.map(s => s.map(g => draft.findIndex(d => d.uid === g)).filter(i => i >= 0)),
     };
-    saveStagePreset(preset);
+    const saved = saveStagePreset(preset);
+    setCurrentStageId(saved.id);
     setPresets(loadStagePresets());
     debugLog.log('patch', `apply "${name}": ${draft.length} приборов, стаков ${resolvedStacks.length}`);
     // 6) Черновик снова = граф (после асинхронного апдейта нод)
@@ -585,35 +603,29 @@ export const PatchNode = ({ data, id, selected }: any) => {
       {/* Заголовок */}
       <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800 cursor-pointer" onClick={toggle}>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-black uppercase tracking-widest text-cyan-400">⚡ Патч</span>
-          <span className="text-[8px] text-zinc-600">
-            приборов {draft.length} · каналов {usedChannels}/{MAX_CHANNELS}
-            {conflictCount > 0 && <span className="text-red-500"> · конфликтов {conflictCount}</span>}
-            {stacks.length > 0 && <span className="text-fuchsia-400"> · стаков {stacks.length}</span>}
-          </span>
+          <span className="text-[10px] font-black uppercase tracking-widest text-cyan-400">⚡ Patch-node</span>
         </div>
         <span className="text-[10px] text-zinc-500">{expanded ? '▼' : '▶'}</span>
       </div>
 
       {expanded && (
         <div className="p-2 space-y-2">
-          {/* Панель действий: undo / пресеты / применить */}
+          {/* Панель действий: текущий Stage / undo / применить / сбросить / удалить */}
           <div className="flex items-center gap-1 flex-wrap rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1">
-            <button className="nodrag nopan text-[10px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 disabled:opacity-30"
-              onClick={undo} disabled={undoRef.current.length === 0} title="Отменить последнее действие">↶</button>
-            <span className="text-[8px] text-zinc-600">undo {undoRef.current.length}</span>
-            <span className="text-[8px] text-zinc-700 mx-1">|</span>
             <select
               className="nodrag nopan bg-zinc-800 rounded px-1 text-[9px] text-zinc-200 outline-none border border-zinc-700 max-w-[180px]"
-              value=""
+              value={currentStageId}
               onChange={(e) => { const p = presets.find(x => x.id === e.target.value); if (p) loadPreset(p); }}
-              title="Загрузить сохранённый патч в черновик">
-              <option value="" disabled>Загрузить патч…</option>
+              title="Текущий Stage — выбери, чтобы загрузить в черновик">
               {presets.map(p => (
                 <option key={p.id} value={p.id}>{p.builtin ? '★ ' : ''}{p.name}</option>
               ))}
             </select>
-            <span className="text-[8px] text-zinc-600">патчи</span>
+            <button className="nodrag nopan text-[10px] px-2 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 disabled:opacity-30"
+              onClick={undo} disabled={undoRef.current.length === 0} title="Отменить последнее действие">
+              <span className="inline-block" style={{ transform: 'rotate(90deg)' }}>↶</span>
+            </button>
+            <span className="text-[8px] text-zinc-500">undo {undoRef.current.length}</span>
             <span className="text-[8px] text-zinc-700 mx-1">|</span>
             <button className="nodrag nopan text-[9px] px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 hover:bg-cyan-500/40 border border-cyan-500/40"
               onClick={openApply} title="Применить черновик в граф (с подтверждением и именем)">
@@ -622,6 +634,11 @@ export const PatchNode = ({ data, id, selected }: any) => {
             <button className="nodrag nopan text-[9px] px-2 py-0.5 rounded bg-zinc-800 text-zinc-400 hover:bg-zinc-700"
               onClick={resync} title="Сбросить черновик к текущему состоянию графа">
               Сбросить
+            </button>
+            <button className="nodrag nopan text-[9px] px-2 py-0.5 rounded bg-red-500/20 text-red-400 hover:bg-red-500/40 border border-red-500/40"
+              onClick={deleteCurrentStage} disabled={!currentStageId}
+              title="Удалить текущий Stage (с подтверждением)">
+              Удалить
             </button>
           </div>
 
@@ -656,8 +673,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
           {/* Полотна юниверсов */}
           <div className="flex flex-col gap-2">
             <UniversePane
-              title="Юниверс 1 · основная линия"
-              subtitle="адреса 1–512"
+              title="Universe 1"
               universe={1}
               fixtures={draft.filter(f => f.universe === 1)}
               sel={sel}
@@ -669,8 +685,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
               onDropProfile={createFromProfile}
             />
             <UniversePane
-              title="Юниверс 2 · отдельная линия OUT2"
-              subtitle="своя карта патчинга"
+              title="Universe 2"
               universe={2}
               fixtures={draft.filter(f => f.universe === 2)}
               sel={sel}
@@ -737,29 +752,6 @@ export const PatchNode = ({ data, id, selected }: any) => {
             </div>
           )}
 
-          {/* Сохранённые патчи (меню выбора и удаления) */}
-          <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5">
-            <div className="text-[8px] text-zinc-500 uppercase font-black mb-1">
-              Патчи-пресеты (stage) <span className="normal-case font-normal">— клик = в черновик, × = удалить</span>
-            </div>
-            <div className="flex gap-1 flex-wrap">
-              {presets.map(p => (
-                <div key={p.id}
-                  className="nodrag nopan group flex items-center gap-1 cursor-pointer rounded-md border border-zinc-700 bg-zinc-800/60 px-1.5 py-0.5 hover:border-cyan-400"
-                  onClick={() => loadPreset(p)}
-                  title={`${p.name} · ${p.fixtures.length} приборов`}>
-                  <span className="text-[8px] text-zinc-300 whitespace-nowrap">{p.builtin ? '★ ' : ''}{p.name}</span>
-                  <span className="text-[8px] text-zinc-400 whitespace-nowrap">{p.fixtures.length}пр</span>
-                  <button
-                    className="text-[8px] text-zinc-600 hover:text-red-400 opacity-0 group-hover:opacity-100"
-                    onClick={(e) => { e.stopPropagation(); deletePreset(p); }}
-                    title={p.builtin ? 'Скрыть дефолтный патч' : 'Удалить патч'}>×</button>
-                </div>
-              ))}
-              {presets.length === 0 && <span className="text-[8px] text-zinc-600">нет патчей</span>}
-            </div>
-          </div>
-
           {/* Банк приборов */}
           <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5">
             <div className="text-[8px] text-zinc-500 uppercase font-black mb-1">
@@ -793,13 +785,13 @@ export const PatchNode = ({ data, id, selected }: any) => {
       {applyOpen && (
         <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/70 rounded-2xl">
           <div className="nodrag nopan bg-zinc-900 border border-zinc-600 rounded-xl p-4 space-y-2 w-80 shadow-2xl">
-            <div className="text-[10px] font-black uppercase tracking-widest text-cyan-400">Применить патч</div>
+            <div className="text-[10px] font-black uppercase tracking-widest text-cyan-400">Применить</div>
             <div className="text-[9px] text-zinc-400">
               {draft.length} приборов · {groups.length} групп · {stacks.length} стаков. Черновик будет закоммичен в граф.
             </div>
             <input
               className="w-full bg-zinc-800 rounded px-2 py-1 text-[11px] text-zinc-100 outline-none border border-zinc-600"
-              placeholder="Имя патча"
+              placeholder="Имя Stage"
               value={applyName}
               onChange={e => setApplyName(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') applyCommit(); }}
