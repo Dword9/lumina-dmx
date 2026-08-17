@@ -81,8 +81,8 @@ export function stagePreset(): StagePreset {
   const fixtures: PatchFixtureDef[] = INITIAL_FIXTURES.map(f => ({
     type: f.type,
     start: f.startChannel,
-    // Физические линии: основная читает 1–191, wireless 200–449 (17.08)
-    universe: (f.startChannel < 200 ? 1 : 2) as 1 | 2,
+    // Все приборы по умолчанию на 1-м юниверсе
+    universe: 1,
     group: STAGE_GROUP[f.id] ?? 0,
     name: f.name,
   }));

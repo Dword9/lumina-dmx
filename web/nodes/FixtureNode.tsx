@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { Handle, Position, useStore } from '@xyflow/react';
+import { Handle, Position, useStore, useReactFlow } from '@xyflow/react';
 import { FIXTURE_LAYOUTS, MAX_DMX_VALUE } from '../constants';
 import { isWashFixture, isRgbWashFixture } from '../utils/graphEngine';
 import { renderRegistry } from '../utils/renderRegistry';
@@ -19,6 +19,7 @@ const getChannelColor = (label: string, type: string, defaultColor: string) => {
 
 export const FixtureNode = ({ data, id, selected }: any) => {
   const [isEditing, setIsEditing] = useState(false);
+  const { setNodes } = useReactFlow();
   const params = data?.params || {};
   const fixtureType = params.fixtureType || 'dimmer';
   
@@ -90,6 +91,13 @@ export const FixtureNode = ({ data, id, selected }: any) => {
 
   const toggleCollapse = () => {
     data?.onParamChange?.(id, 'isCollapsed', !isCollapsed);
+  };
+
+  const sendToPocket = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (params.pocketPos) {
+      setNodes(nds => nds.map(n => n.id === id ? { ...n, position: params.pocketPos } : n));
+    }
   };
   
   // Ensure currentValuesRef is always the correct length (в эффекте, не в рендере)
@@ -364,7 +372,17 @@ export const FixtureNode = ({ data, id, selected }: any) => {
           </div>
         </div>
         <div className="flex items-center gap-2 ml-2">
-           {layout.length > 2 && (
+             {params.pocketPos && (
+               <button
+                 onClick={sendToPocket}
+                 onPointerDown={(e) => e.stopPropagation()}
+                 className="nodrag nopan text-zinc-500 hover:text-cyan-400 transition-colors p-1"
+                 title="Убрать в карман"
+               >
+                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+               </button>
+             )}
+             {layout.length > 2 && (
              <button
                onClick={toggleCollapse}
                onPointerDown={(e) => e.stopPropagation()}

@@ -15,9 +15,9 @@ import { loadStagePresets, saveStagePreset, removeStagePreset, suggestNextName, 
 // ---------------------------------------------------------------------------
 
 const CELL_W = 8;
-const STRIP_H = 46;
+const STRIP_H = 124;
 const BAR_H = 13;
-const BAR_TOP = [3, 18, 32];
+const BAR_TOP = [3, 18, 33, 48, 63, 78, 93, 108];
 const CANVAS_W = MAX_CHANNELS * CELL_W;
 
 type LayoutChannel = { offset: number; label: string; type: string };
@@ -133,6 +133,7 @@ const UniversePane: React.FC<{
   onDropProfile: (profileId: string, ch: number, universe: 1 | 2) => void;
 }> = ({ title, universe, fixtures, sel, focusGroup, stacked, conflicts, onBarPointerDown, onBarClick, onDropProfile }) => {
   const stripRef = useRef<HTMLDivElement>(null);
+  const { getZoom } = useReactFlow();
   const [dropCh, setDropCh] = useState<number | null>(null);
   const chanCount = fixtures.reduce((a, f) => a + f.len, 0);
   const confCount = fixtures.filter(f => conflicts.has(f.uid) && !stacked.has(f.uid)).length;
@@ -150,20 +151,40 @@ const UniversePane: React.FC<{
 
   const zebra = `repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0, rgba(255,255,255,0.04) ${CELL_W}px, transparent ${CELL_W}px, transparent ${CELL_W * 2}px)`;
 
+  const getLocalX = (e: React.DragEvent): number | null => {
+    let target = e.nativeEvent.target as HTMLElement;
+    let x = e.nativeEvent.offsetX;
+    while (target && target !== stripRef.current) {
+      if (target === stripRef.current?.parentElement) return null; // Outside strip
+      x += target.offsetLeft;
+      target = target.offsetParent as HTMLElement;
+    }
+    if (target === stripRef.current) return x;
+    return null;
+  };
+
   const onDragOver = (e: React.DragEvent) => {
-    const el = stripRef.current;
-    if (!el) return;
     e.preventDefault();
-    const rect = el.getBoundingClientRect();
-    const ch = clamp(Math.floor((e.clientX - rect.left + el.scrollLeft) / CELL_W) + 1, 1, MAX_CHANNELS);
-    setDropCh(ch);
+    const localX = getLocalX(e);
+    if (localX !== null) {
+      const ch = clamp(Math.floor(localX / CELL_W) + 1, 1, MAX_CHANNELS);
+      setDropCh(ch);
+    } else {
+      setDropCh(null);
+    }
   };
 
   const onDrop = (e: React.DragEvent) => {
     e.preventDefault();
     const profileId = e.dataTransfer.getData('text/plain');
     if (!profileId) return;
-    const ch = dropCh || 1;
+    
+    let ch = dropCh || 1;
+    const localX = getLocalX(e);
+    if (localX !== null) {
+      ch = clamp(Math.floor(localX / CELL_W) + 1, 1, MAX_CHANNELS);
+    }
+    
     setDropCh(null);
     onDropProfile(profileId, ch, universe);
   };
@@ -258,7 +279,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
   const expanded = !!params.expanded;
 
   const graphNodes = useStore((s: any) => s.nodes);
-  const { getNode } = useReactFlow();
+  const { getNode, getZoom, setNodes } = useReactFlow();
 
   const [bank, setBank] = useState<FixtureProfile[]>(() => loadFixtureBank());
   const [presets, setPresets] = useState<StagePreset[]>(() => loadStagePresets());
@@ -276,10 +297,12 @@ export const PatchNode = ({ data, id, selected }: any) => {
   const [newGroup, setNewGroup] = useState('');
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyName, setApplyName] = useState('');
-  const dragRef = useRef<{ fid: string; origStart: number; startX: number; len: number; last: number } | null>(null);
+  const dragRef = useRef<{ fid: string; origStart: number; startX: number; len: number; last: number; zoom: number } | null>(null);
   const movedRef = useRef(false);
   const undoRef = useRef<Snapshot[]>([]);
   const patchPos = getNode(id)?.position;
+  
+  const zoom = getZoom ? getZoom() : 1;
 
   const conflicts = useMemo(() => computeConflicts(draft, stacks), [draft, stacks]);
   const stacked = useMemo(() => new Set<string>(stacks.flat()), [stacks]);
@@ -354,11 +377,13 @@ export const PatchNode = ({ data, id, selected }: any) => {
   const onBarPointerDown = useCallback((e: React.PointerEvent, f: DraftFixture) => {
     if (e.button !== 0) return;
     e.stopPropagation();
-    dragRef.current = { fid: f.uid, origStart: f.start, startX: e.clientX, len: f.len, last: f.start };
+    const zoom = getZoom ? getZoom() : 1;
+    dragRef.current = { fid: f.uid, origStart: f.start, startX: e.clientX, len: f.len, last: f.start, zoom };
     const onMove = (ev: PointerEvent) => {
-      const d = dragRef.current;
+      const d = dragRef.current as any;
       if (!d) return;
-      const ns = clamp(d.origStart + Math.round((ev.clientX - d.startX) / CELL_W), 1, MAX_CHANNELS - d.len + 1);
+      const localDeltaX = (ev.clientX - d.startX) / (d.zoom || 1);
+      const ns = clamp(d.origStart + Math.round(localDeltaX / CELL_W), 1, MAX_CHANNELS - d.len + 1);
       if (ns !== d.last) {
         d.last = ns;
         setDraft(prev => prev.map(x => x.uid === d.fid ? { ...x, start: ns } : x));
@@ -389,7 +414,15 @@ export const PatchNode = ({ data, id, selected }: any) => {
       selectOnly(f);
       debugLog.log('patch', `select ${f.uid} (ch ${f.start}, U${f.universe}, ${f.name})`);
     }
-  }, []);
+
+    if (f.srcId && patchPos) {
+      // Teleport the corresponding node to the right of the PatchNode
+      // Add a slight random offset so multiple clicked nodes don't stack perfectly
+      const rx = Math.random() * 40 - 20;
+      const ry = Math.random() * 40 - 20;
+      setNodes(nds => nds.map(n => n.id === f.srcId ? { ...n, position: { x: patchPos.x + 880 + rx, y: patchPos.y + 40 + ry } } : n));
+    }
+  }, [patchPos, setNodes]);
 
   const setAddress = (v: string) => {
     const fid = [...sel][0];
@@ -527,11 +560,19 @@ export const PatchNode = ({ data, id, selected }: any) => {
     const uidToGraph = new Map<string, string>();
     const idBase = `fx-${Date.now()}-`;
     draft.forEach((d, i) => {
-      if (d.srcId) { uidToGraph.set(d.uid, d.srcId); return; }
+      const COLS = 6;
+      const row = Math.floor(i / COLS);
+      const col = i % COLS;
+      const pocketPos = patchPos ? { x: patchPos.x + col * 150, y: patchPos.y + 700 + row * 100 } : undefined;
+
+      if (d.srcId) { 
+        uidToGraph.set(d.uid, d.srcId); 
+        data?.onParamChange?.(d.srcId, 'pocketPos', pocketPos);
+        return; 
+      }
       const nid = `${idBase}${i}`;
       uidToGraph.set(d.uid, nid);
-      const pos = patchPos ? { x: patchPos.x + 80 + i * 12, y: patchPos.y + 60 } : undefined;
-      data?.onAddNode?.('fixture', pos, {
+      data?.onAddNode?.('fixture', pocketPos, {
         label: d.name,
         params: {
           fixtureType: d.type,
@@ -542,6 +583,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
           manualValues: Array(d.len).fill(0),
           mutes: Array(d.len).fill(false),
           currentValues: Array(d.len).fill(0),
+          pocketPos,
         },
       }, nid);
     });
