@@ -507,9 +507,13 @@ export const PatchNode = ({ data, id, selected }: any) => {
               ...n, 
               parentId: undefined, // Pull it out of the pocket
               hidden: false,       // Make it visible
+              selected: true,      // Make it active/selected
               zIndex: Math.max(maxZ + 1, 100), // Stack on top of all nodes and previously called nodes
               position: { x: flowPos.x + 30 + rx, y: flowPos.y - 20 + ry } 
             };
+          }
+          if (n.selected) {
+            return { ...n, selected: false }; // Deselect others
           }
           return n;
         });

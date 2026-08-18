@@ -1153,6 +1153,9 @@ const FlowWrapper: React.FC = () => {
     return [...nodes].sort((a, b) => {
         if (a.type === 'pocket' && b.type !== 'pocket') return -1;
         if (a.type !== 'pocket' && b.type === 'pocket') return 1;
+        const az = a.zIndex ?? 0;
+        const bz = b.zIndex ?? 0;
+        if (az !== bz) return az - bz;
         return 0;
     });
   }, [nodes]);
