@@ -1,6 +1,6 @@
 
 import React, { useMemo, useState, useCallback, useRef } from 'react';
-import { useStore, useReactFlow } from '@xyflow/react';
+import { useStore, useReactFlow, NodeResizer } from '@xyflow/react';
 import { MAX_CHANNELS, FIXTURE_LAYOUTS } from '../constants';
 import { loadFixtureBank, saveFixtureProfile, removeFixtureProfile, FixtureProfile } from '../utils/fixtureBank';
 import { debugLog } from '../utils/debugLog';
@@ -15,9 +15,9 @@ import { loadStagePresets, saveStagePreset, removeStagePreset, suggestNextName, 
 // ---------------------------------------------------------------------------
 
 const CELL_W = 8;
-const STRIP_H = 124;
+const MIN_STRIP_H = 36;
 const BAR_H = 13;
-const BAR_TOP = [3, 18, 33, 48, 63, 78, 93, 108];
+const getBarTop = (level: number) => 3 + level * 15;
 const CANVAS_W = MAX_CHANNELS * CELL_W;
 
 type LayoutChannel = { offset: number; label: string; type: string };
@@ -144,10 +144,26 @@ const UniversePane: React.FC<{
     sorted.forEach((f, i) => {
       const prev = sorted.slice(0, i).filter(o =>
         o.uid !== f.uid && f.start < o.start + o.len && o.start < f.start + f.len);
-      map[f.uid] = Math.min(prev.length, BAR_TOP.length - 1);
+      let level = 0;
+      const taken = new Set(prev.map(o => map[o.uid]));
+      while (taken.has(level)) level++;
+      map[f.uid] = Math.min(level, 49); // adaptive up to 50 levels
     });
     return map;
   }, [fixtures]);
+
+  const maxLevel = fixtures.length > 0 ? Math.max(0, ...Object.values(offsets)) : 0;
+  const dynamicStripH = Math.max(MIN_STRIP_H, getBarTop(maxLevel) + BAR_H + 8);
+
+  React.useEffect(() => {
+    if (focusGroup !== null) {
+      const first = fixtures.find(f => f.group === focusGroup);
+      if (first && stripRef.current?.parentElement) {
+        const targetX = (first.start - 1) * CELL_W;
+        stripRef.current.parentElement.scrollTo({ left: Math.max(0, targetX - 100), behavior: 'smooth' });
+      }
+    }
+  }, [focusGroup, fixtures]);
 
   const zebra = `repeating-linear-gradient(90deg, rgba(255,255,255,0.04) 0, rgba(255,255,255,0.04) ${CELL_W}px, transparent ${CELL_W}px, transparent ${CELL_W * 2}px)`;
 
@@ -190,15 +206,15 @@ const UniversePane: React.FC<{
   };
 
   return (
-    <div className="flex-1 min-w-0">
-      <div className="flex items-baseline justify-between mb-0.5 px-0.5">
+    <div className="flex-1 min-w-0 flex flex-col min-h-0">
+      <div className="flex items-baseline justify-between mb-0.5 px-0.5 shrink-0">
         <span className="text-[10px] font-black tracking-wider" style={{ color: universe === 2 ? '#22d3ee' : '#10b981' }}>{title}</span>
         <span className="text-[8px] text-zinc-500">
           приборов {fixtures.length} · каналов {chanCount}
           {confCount > 0 && <span className="text-red-500"> · конфликтов {confCount}</span>}
         </span>
       </div>
-      <div className="nodrag nopan overflow-x-auto rounded-lg border border-zinc-800 bg-zinc-950"
+      <div className="nodrag nopan overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 flex-1 flex flex-col min-h-0"
         style={{ maxWidth: '100%' }}
         onDragOver={onDragOver} onDragLeave={() => setDropCh(null)} onDrop={onDrop}>
         {/* Рулер */}
@@ -217,7 +233,7 @@ const UniversePane: React.FC<{
           ))}
         </div>
         {/* Полоса юниверса */}
-        <div ref={stripRef} className="relative" style={{ width: CANVAS_W, height: STRIP_H, background: zebra }}>
+        <div ref={stripRef} className="relative flex-1 transition-all duration-300" style={{ width: CANVAS_W, minHeight: dynamicStripH, background: zebra }}>
           {Array.from({ length: 512 / 10 - 1 }, (_, i) => (
             <div key={i} className="absolute top-0 bottom-0 w-px bg-zinc-800/40" style={{ left: (i + 1) * 10 * CELL_W }} />
           ))}
@@ -236,15 +252,16 @@ const UniversePane: React.FC<{
                 data-conflict={isConflict ? '1' : '0'}
                 style={{
                   left: (f.start - 1) * CELL_W,
-                  top: BAR_TOP[offsets[f.uid]],
+                  top: getBarTop(offsets[f.uid] || 0),
                   height: BAR_H,
                   width: f.len * CELL_W,
                   display: 'flex',
                   overflow: 'hidden',
                   borderRadius: 3,
                   background: `${f.color}26`,
-                  border: `1px solid ${isConflict ? '#ef4444' : selected ? '#22d3ee' : `${f.color}88`}`,
-                  boxShadow: isConflict ? '0 0 8px rgba(239,68,68,.5)' : focused ? '0 0 6px #ef4444aa' : undefined,
+                  border: `1.5px solid ${focused ? '#22d3ee' : isConflict ? '#ef4444' : selected ? '#52525b' : `${f.color}88`}`,
+                  boxShadow: focused ? '0 0 8px 2px rgba(34,211,238,0.7)' : isConflict ? '0 0 8px rgba(239,68,68,.5)' : undefined,
+                  animation: focused ? 'borderPulse 1s ease-in-out infinite' : undefined,
                   zIndex: selected ? 15 : focused ? 10 : 5,
                 }}
                 onPointerDown={(e) => onBarPointerDown(e, f)}
@@ -294,10 +311,10 @@ export const PatchNode = ({ data, id, selected }: any) => {
   const [stacks, setStacks] = useState<string[][]>(() => Array.isArray(params.stacks) ? params.stacks : []);
   const [sel, setSel] = useState<Set<string>>(new Set());
   const [focusGroup, setFocusGroup] = useState<number | null>(null);
-  const [newGroup, setNewGroup] = useState('');
+
   const [applyOpen, setApplyOpen] = useState(false);
   const [applyName, setApplyName] = useState('');
-  const dragRef = useRef<{ fid: string; origStart: number; startX: number; len: number; last: number; zoom: number } | null>(null);
+  const dragRef = useRef<{ fid: string; origStart: number; startX: number; len: number; last: number; zoom: number; siblings: { uid: string; origStart: number; len: number }[] } | null>(null);
   const movedRef = useRef(false);
   const undoRef = useRef<Snapshot[]>([]);
   const patchPos = getNode(id)?.position;
@@ -339,24 +356,66 @@ export const PatchNode = ({ data, id, selected }: any) => {
     setGroupsState(Array.isArray(params.groups) ? [...params.groups] : []);
   };
 
-  // --- Маркеры групп (явные + производные) ----------------------------------
+  // --- Маркеры групп (производные из приборов) --------------------------------
   const groupMarkers = useMemo(() => {
     const derived = new Map<number, number>();
     draft.forEach(f => derived.set(f.group, (derived.get(f.group) || 0) + 1));
-    groups.forEach(g => { if (!derived.has(g)) derived.set(g, 0); });
     return [...derived.entries()].sort((a, b) => a[0] - b[0]);
-  }, [draft, groups]);
+  }, [draft]);
 
-  const dupGroups = useMemo(() => {
-    const seen = new Set<number>();
-    const dup = new Set<number>();
-    groups.forEach(g => { if (seen.has(g)) dup.add(g); seen.add(g); });
-    return dup;
-  }, [groups]);
+  const isExpandedRef = useRef(!!params.expanded);
+  React.useEffect(() => {
+    isExpandedRef.current = !!params.expanded;
+  }, [params.expanded]);
 
-  const toggle = () => {
-    debugLog.log('patch', `toggle ${expanded ? 'collapse' : 'expand'}`);
-    data?.onParamChange?.(id, 'expanded', !expanded);
+  const toggle = (e?: React.MouseEvent) => {
+    if (e) e.stopPropagation();
+    
+    const isExpanded = isExpandedRef.current;
+    isExpandedRef.current = !isExpanded;
+    
+    debugLog.log('patch', `toggle ${isExpanded ? 'collapse' : 'expand'}`);
+    data?.onParamChange?.(id, 'expanded', !isExpanded);
+    
+    setNodes(nds => nds.map(n => {
+      if (n.id === id) {
+        const nodeData = n.data as any;
+        if (isExpanded) {
+          // Collapsing: save current dimensions and shrink
+          return { 
+            ...n, 
+            data: { 
+              ...nodeData, 
+              params: { 
+                ...(nodeData?.params || {}), 
+                expanded: false, 
+                savedWidth: n.style?.width, 
+                savedHeight: n.style?.height 
+              } 
+            },
+            style: { ...n.style, width: 200, height: 40 }
+          };
+        } else {
+          // Expanding: restore dimensions or use default
+          return {
+            ...n,
+            data: { 
+              ...nodeData, 
+              params: { 
+                ...(nodeData?.params || {}), 
+                expanded: true 
+              } 
+            },
+            style: { 
+              ...n.style, 
+              width: nodeData?.params?.savedWidth || 1300, 
+              height: nodeData?.params?.savedHeight || 850 
+            }
+          };
+        }
+      }
+      return n;
+    }));
   };
 
   const selectOnly = (f: DraftFixture) => setSel(new Set([f.uid]));
@@ -378,21 +437,40 @@ export const PatchNode = ({ data, id, selected }: any) => {
     if (e.button !== 0) return;
     e.stopPropagation();
     const zoom = getZoom ? getZoom() : 1;
-    dragRef.current = { fid: f.uid, origStart: f.start, startX: e.clientX, len: f.len, last: f.start, zoom };
+    // Find stack siblings for this fixture (if any)
+    const stack = stacks.find(s => s.includes(f.uid));
+    const siblings: { uid: string; origStart: number; len: number }[] = [];
+    if (stack) {
+      stack.forEach(sid => {
+        const sf = draft.find(x => x.uid === sid);
+        if (sf) siblings.push({ uid: sid, origStart: sf.start, len: sf.len });
+      });
+    }
+    dragRef.current = { fid: f.uid, origStart: f.start, startX: e.clientX, len: f.len, last: f.start, zoom, siblings };
     const onMove = (ev: PointerEvent) => {
       const d = dragRef.current as any;
       if (!d) return;
       const localDeltaX = (ev.clientX - d.startX) / (d.zoom || 1);
-      const ns = clamp(d.origStart + Math.round(localDeltaX / CELL_W), 1, MAX_CHANNELS - d.len + 1);
+      const deltaCh = Math.round(localDeltaX / CELL_W);
+      const ns = clamp(d.origStart + deltaCh, 1, MAX_CHANNELS - d.len + 1);
       if (ns !== d.last) {
         d.last = ns;
-        setDraft(prev => prev.map(x => x.uid === d.fid ? { ...x, start: ns } : x));
+        if (d.siblings.length > 0) {
+          // Move all stacked siblings by the same delta
+          const siblingMap = new Map<string, number>();
+          d.siblings.forEach((s: any) => {
+            siblingMap.set(s.uid, clamp(s.origStart + deltaCh, 1, MAX_CHANNELS - s.len + 1));
+          });
+          setDraft(prev => prev.map(x => siblingMap.has(x.uid) ? { ...x, start: siblingMap.get(x.uid)! } : x));
+        } else {
+          setDraft(prev => prev.map(x => x.uid === d.fid ? { ...x, start: ns } : x));
+        }
       }
     };
     const onUp = () => {
       const d = dragRef.current;
       if (d && d.last !== d.origStart) {
-        debugLog.log('patch', `drag-address ${d.fid} ${d.origStart} -> ${d.last}`);
+        debugLog.log('patch', `drag-address ${d.fid} ${d.origStart} -> ${d.last}${d.siblings.length > 0 ? ` (stack: ${d.siblings.length})` : ''}`);
       }
       movedRef.current = dragRef.current ? dragRef.current.last !== dragRef.current.origStart : false;
       if (movedRef.current) pushSnapshot('адрес');
@@ -402,7 +480,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
     };
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
-  }, []);
+  }, [stacks, draft]);
 
   const onBarClick = useCallback((e: React.MouseEvent, f: DraftFixture) => {
     e.stopPropagation();
@@ -476,14 +554,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
     setSel(new Set());
   };
 
-  const addGroup = () => {
-    const g = parseInt(newGroup, 10);
-    if (isNaN(g)) return;
-    pushSnapshot('маркер группы');
-    debugLog.log('patch', `add-group-marker ${g}`);
-    setGroupsState(prev => prev.includes(g) ? prev : [...prev, g]);
-    setNewGroup('');
-  };
+
 
   const createFromProfile = (profileId: string, ch: number, universe: 1 | 2) => {
     const profile = bank.find(p => p.id === profileId);
@@ -558,22 +629,49 @@ export const PatchNode = ({ data, id, selected }: any) => {
     // 1) Рефрешим стек перед коммитом — откат к «до черновика»
     pushSnapshot(`применить "${name}"`);
     const uidToGraph = new Map<string, string>();
+    const pocketId = `pocket-${id}`;
+    const pocketNode = graphNodes.find((n: any) => n.id === pocketId);
+    let isCollapsed = false;
+    
+    // Вычисляем размеры кармана на основе кол-ва приборов
+    const COLS = 6;
+    const rows = Math.ceil(draft.length / COLS);
+    const pocketW = Math.max(COLS * 160 + 40, 1000);
+    const pocketH = Math.max(rows * 110 + 80, 400);
+
+    if (!pocketNode) {
+      const pocketPos = patchPos ? { x: patchPos.x + 880, y: patchPos.y } : { x: 800, y: 100 };
+      data?.onAddNode?.('pocket', pocketPos, { 
+        label: `Группа: ${name}`, 
+        style: { width: pocketW, height: pocketH } 
+      }, pocketId);
+    } else {
+      isCollapsed = !!pocketNode.data?.params?.collapsed;
+      if (pocketNode.data?.label !== `Группа: ${name}`) {
+         data?.onParamChange?.(pocketId, 'label', `Группа: ${name}`);
+      }
+    }
+
     const idBase = `fx-${Date.now()}-`;
     draft.forEach((d, i) => {
-      const COLS = 6;
       const row = Math.floor(i / COLS);
       const col = i % COLS;
-      const pocketPos = patchPos ? { x: patchPos.x + col * 150, y: patchPos.y + 700 + row * 100 } : undefined;
+      const localPos = { x: 20 + col * 160, y: 60 + row * 110 };
 
       if (d.srcId) { 
         uidToGraph.set(d.uid, d.srcId); 
-        data?.onParamChange?.(d.srcId, 'pocketPos', pocketPos);
+        data?.onParamChange?.(d.srcId, 'position', localPos);
+        data?.onParamChange?.(d.srcId, 'parentId', pocketId);
+        data?.onParamChange?.(d.srcId, 'hidden', isCollapsed);
         return; 
       }
       const nid = `${idBase}${i}`;
       uidToGraph.set(d.uid, nid);
-      data?.onAddNode?.('fixture', pocketPos, {
+      data?.onAddNode?.('fixture', localPos, {
         label: d.name,
+        parentId: pocketId,
+        hidden: isCollapsed,
+        color: d.color,
         params: {
           fixtureType: d.type,
           ...(d.customLayout ? { customLayout: d.customLayout } : {}),
@@ -583,7 +681,6 @@ export const PatchNode = ({ data, id, selected }: any) => {
           manualValues: Array(d.len).fill(0),
           mutes: Array(d.len).fill(false),
           currentValues: Array(d.len).fill(0),
-          pocketPos,
         },
       }, nid);
     });
@@ -640,20 +737,33 @@ export const PatchNode = ({ data, id, selected }: any) => {
   const singleSel = selFixtures.length === 1 ? selFixtures[0] : null;
 
   return (
-    <div className={`relative bg-zinc-900 border-2 rounded-2xl shadow-2xl transition-all duration-300 ${selected ? 'border-zinc-500' : 'border-zinc-800'}`}
-      style={{ width: 840 }}>
-      {/* Заголовок */}
-      <div className="flex items-center justify-between px-3 py-2 border-b border-zinc-800 cursor-pointer" onClick={toggle}>
+    <>
+      {expanded && (
+        <NodeResizer 
+          minWidth={840} 
+          minHeight={400} 
+          isVisible={selected} 
+          color="#52525b" 
+          lineStyle={{ borderWidth: 2, borderColor: '#52525b' }}
+          handleStyle={{ width: 14, height: 14, borderRadius: 3, backgroundColor: '#18181b', border: '2px solid #52525b' }}
+        />
+      )}
+      <div className={`relative bg-zinc-900 border-2 rounded-2xl shadow-2xl transition-all duration-300 flex flex-col overflow-hidden outline-none ${selected ? 'border-zinc-700' : 'border-zinc-800'}`}
+        style={{ width: '100%', height: '100%' }}>
+        {/* Заголовок */}
+      <div className={`flex items-center justify-between px-3 py-2 cursor-pointer ${expanded ? 'border-b border-zinc-800' : ''}`} onClick={(e) => toggle(e)}>
         <div className="flex items-center gap-2">
-          <span className="text-[10px] font-black uppercase tracking-widest text-cyan-400">⚡ Patch-node</span>
+          <div className="flex items-center justify-center w-6 h-6 rounded hover:bg-white/5 text-cyan-400">
+            <span className="text-[12px] opacity-80">{!expanded ? '▶' : '▼'}</span>
+          </div>
+          <span className="text-[10px] font-black uppercase tracking-widest text-cyan-400 select-none">⚡ Patch-node</span>
         </div>
-        <span className="text-[10px] text-zinc-500">{expanded ? '▼' : '▶'}</span>
       </div>
 
       {expanded && (
-        <div className="p-2 space-y-2">
+        <div className="p-2 flex flex-col gap-2 flex-1 min-h-0">
           {/* Панель действий: текущий Stage / undo / применить / сбросить / удалить */}
-          <div className="flex items-center gap-1 flex-wrap rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1">
+          <div className="flex items-center gap-1 flex-wrap rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 shrink-0">
             <select
               className="nodrag nopan bg-zinc-800 rounded px-1 text-[9px] text-zinc-200 outline-none border border-zinc-700 max-w-[180px]"
               value={currentStageId}
@@ -684,36 +794,23 @@ export const PatchNode = ({ data, id, selected }: any) => {
             </button>
           </div>
 
-          {/* Маркеры групп */}
-          <div className="flex items-center gap-1 flex-wrap rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1">
-            <span className="text-[8px] text-zinc-500 uppercase font-black mr-1">Группы (ALT+N):</span>
+          {/* Группы приборов */}
+          <div className="flex items-center gap-1 flex-wrap rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1 shrink-0">
+            <span className="text-[8px] text-zinc-500 uppercase font-black mr-1">Группы:</span>
             {groupMarkers.length === 0 && <span className="text-[8px] text-zinc-600">нет групп</span>}
             {groupMarkers.map(([g, cnt]) => (
               <button key={g}
-                className={`nodrag nopan text-[9px] font-black px-1.5 py-0.5 rounded-full border transition-all ${dupGroups.has(g) ? 'border-red-400 text-red-300 animate-pulse' : 'border-red-500/60 text-red-300'}`}
-                style={{ background: focusGroup === g ? '#ef444444' : '#18181b' }}
+                className={`nodrag nopan text-[9px] font-black px-1.5 py-0.5 rounded-full border transition-all ${focusGroup === g ? 'border-cyan-400 text-cyan-300' : 'border-zinc-600 text-zinc-300 hover:border-zinc-400'}`}
+                style={{ background: focusGroup === g ? '#22d3ee22' : '#18181b' }}
                 onClick={(e) => { e.stopPropagation(); setFocusGroup(focusGroup === g ? null : g); }}
-                title={dupGroups.has(g) ? `⚠ Дубль номера группы ${g} в списке!` : `Группа ${g}: ${cnt} приборов. Клик — подсветить`}>
-                {g}{cnt > 0 && <span className="ml-0.5 text-zinc-500">{cnt}</span>}
+                title={`Группа ${g}: ${cnt} приборов. Клик — подсветить и перейти`}>
+                {g}<span className="ml-0.5 text-zinc-500">{cnt}</span>
               </button>
             ))}
-            <input
-              className="nodrag nopan w-10 bg-zinc-800 rounded px-1 text-[9px] text-zinc-300 outline-none border border-zinc-700"
-              placeholder="№"
-              value={newGroup}
-              onChange={e => setNewGroup(e.target.value)}
-              onKeyDown={e => { if (e.key === 'Enter') addGroup(); }}
-              onPointerDown={e => e.stopPropagation()}
-            />
-            <button className="nodrag nopan text-[9px] px-1.5 py-0.5 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
-              onClick={(e) => { e.stopPropagation(); addGroup(); }}>+</button>
-            {dupGroups.size > 0 && (
-              <span className="text-[8px] text-red-500 font-bold">⚠ одинаковые номера групп</span>
-            )}
           </div>
 
           {/* Полотна юниверсов */}
-          <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-2 flex-1 min-h-0">
             <UniversePane
               title="Universe 1"
               universe={1}
@@ -741,9 +838,8 @@ export const PatchNode = ({ data, id, selected }: any) => {
           </div>
 
           {/* Панель редактирования выбранных приборов */}
-          {selFixtures.length > 0 && (
-            <div className="flex items-center gap-2 flex-wrap rounded-lg border border-cyan-500/30 bg-zinc-950 px-2 py-1.5">
-              <span className="text-[8px] text-cyan-400 uppercase font-black">Выбрано: {selFixtures.length}</span>
+          <div className={`flex items-center gap-2 flex-wrap rounded-lg border px-2 py-1.5 transition-all duration-300 shrink-0 ${selFixtures.length > 0 ? 'border-cyan-500/30 bg-zinc-950' : 'border-zinc-800/50 bg-zinc-950/30 opacity-50 pointer-events-none'}`}>
+            <span className={`text-[8px] uppercase font-black ${selFixtures.length > 0 ? 'text-cyan-400' : 'text-zinc-600'}`}>Выбрано: {selFixtures.length}</span>
               {singleSel ? (
                 <>
                   <input
@@ -792,10 +888,9 @@ export const PatchNode = ({ data, id, selected }: any) => {
                 Удалить
               </button>
             </div>
-          )}
 
           {/* Банк приборов */}
-          <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5">
+          <div className="rounded-lg border border-zinc-800 bg-zinc-950 px-2 py-1.5 shrink-0">
             <div className="text-[8px] text-zinc-500 uppercase font-black mb-1">
               Банк приборов <span className="normal-case font-normal">(перетащи на полотно U1/U2)</span>
             </div>
@@ -848,6 +943,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
           </div>
         </div>
       )}
-    </div>
+      </div>
+    </>
   );
 };

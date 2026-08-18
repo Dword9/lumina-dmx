@@ -193,6 +193,18 @@ const Header: React.FC<HeaderProps> = ({
 
             <div className="w-px h-6 bg-zinc-800 mx-1" />
 
+            {/* RELOAD UI */}
+            <button 
+                onClick={() => { localStorage.clear(); window.location.href = '/?reset=1'; }}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-[10px] font-black border-2 transition-all active:scale-95 bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-white"
+                title="Сброс кэша и перезагрузка интерфейса (помогает при зависаниях и черном экране)"
+            >
+              <RefreshCw size={14} />
+              RELOAD UI
+            </button>
+
+            <div className="w-px h-6 bg-zinc-800 mx-1" />
+
             {/* SETTINGS GEAR */}
             <div className="relative" ref={settingsRef}>
                 <button 

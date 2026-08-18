@@ -25,6 +25,11 @@
     --grid-color: #1a1a24;
     --accent-color: #10b981;
   }
+
+  @keyframes borderPulse {
+    0%, 100% { box-shadow: 0 0 8px 2px rgba(34,211,238,0.7); }
+    50% { box-shadow: 0 0 2px 0px rgba(34,211,238,0.15); }
+  }
   
   .react-flow__pane {
     background-color: var(--bg-color);
@@ -36,6 +41,10 @@
     background-size: 100px 100px, 100px 100px, 20px 20px, 20px 20px;
     background-position: center center;
     cursor: crosshair !important;
+  }
+
+  .react-flow__node-pocket {
+    z-index: 0 !important;
   }
 
   /* SPACE PANNING & RIGHT CLICK PANNING LOGIC */
@@ -78,7 +87,7 @@
   }
 
   /* Ensure controls are always clickable even when node is selected */
-  .react-flow__node .nodrag {
+  .react-flow__node .nodrag:not(.react-flow__resize-control) {
     cursor: pointer !important;
     pointer-events: all !important;
   }

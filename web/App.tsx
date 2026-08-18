@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
+import React, { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
 import { 
   ReactFlow, 
   Controls, 
@@ -30,6 +30,7 @@ import { MusicTrackNode } from './nodes/MusicTrackNode';
 import { PaletteNode } from './nodes/PaletteNode';
 import { KkzNode } from './nodes/KkzNode';
 import { PatchNode } from './nodes/PatchNode';
+import { PocketNode } from './nodes/PocketNode';
 import { KKZ_URL, KKZ_PIN } from './electron/kkz-client.mjs';
 import ButtonEdge from './components/ButtonEdge';
 import Header from './components/Header';
@@ -72,7 +73,8 @@ const nodeTypes = {
   'music-track': memo(MusicTrackNode),
   palette: memo(PaletteNode),
   kkz: memo(KkzNode),
-  patch: memo(PatchNode)
+  patch: memo(PatchNode),
+  pocket: memo(PocketNode)
 };
 
 const edgeTypes = {
@@ -161,7 +163,7 @@ const sanitizeGraph = (rawNodes: LuminaNode[], rawEdges: LuminaEdge[]) => {
 };
 
 const FlowWrapper: React.FC = () => {
-  const { fitView, getNodes } = useReactFlow();
+  const { fitView, getNodes, getIntersectingNodes, getNode } = useReactFlow();
   
   // -- State --
   const [nodes, setNodes] = useState<LuminaNode[]>([]);
@@ -448,58 +450,52 @@ const FlowWrapper: React.FC = () => {
     });
   }, []);
 
-  const handleNodeParamChange = useCallback((nodeId: string, key: string, val: any) => {
-    setNodes(nds => {
-      const sourceNode = nds.find(n => n.id === nodeId);
-      if (!sourceNode) return nds;
+  const handleNodeParamChange = useCallback((id: string, key: string, val: any) => {
+    setNodes(nds => nds.map(n => {
+      if (n.id === id) {
+        if (key === 'parentId') return { ...n, parentId: val };
+        if (key === 'position') return { ...n, position: val };
+        if (key === 'hidden') return { ...n, hidden: val };
 
-      const isGroupOperation = sourceNode.selected && nds.filter(n => n.selected).length > 1;
-
-      return nds.map(n => {
         if (key === 'color') {
-            if (n.id === nodeId || (isGroupOperation && n.selected)) {
-                 return { ...n, data: { ...n.data, color: val } };
-            }
-            return n;
+             return { ...n, data: { ...n.data, color: val } };
         }
 
-        if (n.id === nodeId) {
-            const oldVal = n.data.params?.[key];
-            if (oldVal !== val && key !== 'currentValues' && key !== 'manualValues') {
-                debugLog.log('param', `${n.type} ${nodeId} .${key}: ${typeof oldVal === 'object' ? JSON.stringify(oldVal) : oldVal} -> ${typeof val === 'object' ? JSON.stringify(val) : val}`);
-            }
-            if (key === 'label') return { ...n, data: { ...n.data, [key]: val } };
-            
-            let updatedParams = { ...n.data.params, [key]: val };
-            
-            // If fixtureType changed, we must resize manualValues and mutes to match the new layout
-            if (key === 'fixtureType' && n.type === 'fixture') {
-                const newLayout = n.data.params?.customLayout || FIXTURE_LAYOUTS[val as keyof typeof FIXTURE_LAYOUTS] || FIXTURE_LAYOUTS.dimmer;
-                const newLen = newLayout.length;
-                
-                const oldManual = n.data.params?.manualValues || [0];
-                const oldMutes = n.data.params?.mutes || [false];
-                
-                const newManual = new Array(newLen).fill(0);
-                const newMutes = new Array(newLen).fill(false);
-                
-                for (let i = 0; i < Math.min(newLen, oldManual.length); i++) {
-                    newManual[i] = oldManual[i];
-                }
-                for (let i = 0; i < Math.min(newLen, oldMutes.length); i++) {
-                    newMutes[i] = oldMutes[i];
-                }
-                
-                updatedParams.manualValues = newManual;
-                updatedParams.mutes = newMutes;
-                updatedParams.currentValues = new Array(newLen).fill(0);
-            }
-
-            return { ...n, data: { ...n.data, params: updatedParams } };
+        const oldVal = n.data.params?.[key];
+        if (oldVal !== val && key !== 'currentValues' && key !== 'manualValues') {
+            debugLog.log('param', `${n.type} ${id} .${key}: ${typeof oldVal === 'object' ? JSON.stringify(oldVal) : oldVal} -> ${typeof val === 'object' ? JSON.stringify(val) : val}`);
         }
-        return n;
-      });
-    });
+        if (key === 'label') return { ...n, data: { ...n.data, [key]: val } };
+            
+        let updatedParams = { ...n.data.params, [key]: val };
+            
+        // If fixtureType changed, we must resize manualValues and mutes to match the new layout
+        if (key === 'fixtureType' && n.type === 'fixture') {
+            const newLayout = n.data.params?.customLayout || FIXTURE_LAYOUTS[val as keyof typeof FIXTURE_LAYOUTS] || FIXTURE_LAYOUTS.dimmer;
+            const newLen = newLayout.length;
+            
+            const oldManual = n.data.params?.manualValues || [0];
+            const oldMutes = n.data.params?.mutes || [false];
+            
+            const newManual = new Array(newLen).fill(0);
+            const newMutes = new Array(newLen).fill(false);
+            
+            for (let i = 0; i < Math.min(newLen, oldManual.length); i++) {
+                newManual[i] = oldManual[i];
+            }
+            for (let i = 0; i < Math.min(newLen, oldMutes.length); i++) {
+                newMutes[i] = oldMutes[i];
+            }
+            
+            updatedParams.manualValues = newManual;
+            updatedParams.mutes = newMutes;
+            updatedParams.currentValues = new Array(newLen).fill(0);
+        }
+
+        return { ...n, data: { ...n.data, params: updatedParams } };
+      }
+      return n;
+    }));
   }, []);
 
   const injectHandlers = useCallback((node: LuminaNode): LuminaNode => {
@@ -1012,12 +1008,154 @@ const FlowWrapper: React.FC = () => {
     if (type === 'music-track' && !initialData) defaultParams = { audioUrl: null, audioName: null, analysisUrl: null, analysisName: null, notes: 0, duration: 0 };
     if (type === 'palette' && !initialData) defaultParams = { hue: 0, saturation: 1 };
     if (type === 'kkz' && !initialData) defaultParams = { url: KKZ_URL, pin: KKZ_PIN, armed: [true, true], master: false };
-    if (type === 'patch' && !initialData) defaultParams = { expanded: false, stacks: [], groups: [] };
-    const newNode: LuminaNode = injectHandlers({ id, type, position: pos || { x: 100, y: 100 }, data: { label: initialData?.label || type.toUpperCase(), type, params: defaultParams } } as LuminaNode);
+    if (type === 'patch' && !initialData) defaultParams = { expanded: true, stacks: [], groups: [] };
+    if (type === 'pocket' && !initialData) defaultParams = { collapsed: false };
+
+    const TYPE_COLORS: Record<string, string> = {
+        'input': '#10b981', 'midi': '#10b981', 'group-activator': '#10b981',
+        'audio': '#10b981', 'math': '#10b981', 'generator': '#c084fc',
+        'comb-controller': '#34d399', 'midi-track': '#fbbf24', 
+        'music-track': '#fcd34d', 'palette': '#e879f9', 'patch': '#22d3ee'
+    };
+    
+    const nodeColor = initialData?.color || TYPE_COLORS[type] || '#3b82f6';
+    
+    const newNodeProps: any = { 
+      id, 
+      type, 
+      position: pos || { x: 100, y: 100 }, 
+      data: { label: initialData?.label || type.toUpperCase(), type, color: nodeColor, params: defaultParams } 
+    };
+    if (initialData?.parentId) newNodeProps.parentId = initialData.parentId;
+    if (initialData?.extent) newNodeProps.extent = initialData.extent;
+    if (initialData?.style) newNodeProps.style = initialData.style;
+    else if (type === 'patch') newNodeProps.style = { width: 1300, height: 850 };
+    
+    if (initialData?.hidden !== undefined) newNodeProps.hidden = initialData.hidden;
+
+    const newNode: LuminaNode = injectHandlers(newNodeProps as LuminaNode);
     debugLog.log('app', `add-node ${type} ${id} label="${initialData?.label || type.toUpperCase()}"`);
     setNodes(nds => [...nds, newNode]);
     setMenu(null);
   };
+
+  const handleGroupNodes = useCallback(() => {
+    setNodes(nds => {
+       const selected = nds.filter(n => n.selected && n.type !== 'pocket');
+       if (selected.length === 0) return nds;
+       
+       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+       selected.forEach(n => {
+            const nx = (n as any).positionAbsolute?.x ?? n.position.x;
+            const ny = (n as any).positionAbsolute?.y ?? n.position.y;
+           const nw = n.measured?.width || 200;
+           const nh = n.measured?.height || 100;
+           if (nx < minX) minX = nx;
+           if (ny < minY) minY = ny;
+           if (nx + nw > maxX) maxX = nx + nw;
+           if (ny + nh > maxY) maxY = ny + nh;
+       });
+       
+       const pocketId = `pocket-${Date.now()}`;
+       const padding = 40;
+       
+       const pocketNode: LuminaNode = injectHandlers({
+           id: pocketId,
+           type: 'pocket',
+           position: { x: minX - padding, y: minY - padding - 40 },
+           data: {
+               label: 'Группа',
+               type: 'pocket',
+               params: { collapsed: false }
+           },
+           style: { width: maxX - minX + padding * 2, height: maxY - minY + padding * 2 + 40 }
+       } as LuminaNode);
+       
+       const updatedNodes = nds.map(n => {
+           if (n.selected && n.type !== 'pocket') {
+               return {
+                   ...n,
+                   parentId: pocketId,
+                   position: { x: ((n as any).positionAbsolute?.x ?? n.position.x) - (minX - padding), y: ((n as any).positionAbsolute?.y ?? n.position.y) - (minY - padding - 40) },
+                   selected: false
+               };
+           }
+           return n;
+       });
+       
+       return [...updatedNodes, pocketNode];
+    });
+  }, [injectHandlers]);
+
+  const handleUngroupAll = useCallback((pocketId: string) => {
+      setNodes(nds => {
+          const pocket = nds.find(n => n.id === pocketId);
+          if (!pocket) return nds;
+          return nds.filter(n => n.id !== pocketId).map(n => {
+              if (n.parentId === pocketId) {
+                  return { ...n, parentId: undefined, position: { x: pocket.position.x + n.position.x, y: pocket.position.y + n.position.y } };
+              }
+              return n;
+          });
+      });
+  }, []);
+
+  const handleUngroupNode = useCallback((nodeId: string) => {
+      setNodes(nds => {
+          const nodeToUngroup = nds.find(n => n.id === nodeId);
+          if (!nodeToUngroup || !nodeToUngroup.parentId) return nds;
+          const pocket = nds.find(n => n.id === nodeToUngroup.parentId);
+          return nds.map(n => {
+              if (n.id === nodeId) {
+                  return { ...n, parentId: undefined, position: { x: (pocket?.position.x ?? 0) + n.position.x, y: (pocket?.position.y ?? 0) + n.position.y } };
+              }
+              return n;
+          });
+      });
+  }, []);
+
+  const onNodeDragStop = useCallback((event: React.MouseEvent, node: any, _nodes: any[]) => {
+      if (node.type === 'pocket') return;
+      
+      const intersections = getIntersectingNodes(node).filter(n => n.type === 'pocket');
+      const pocket = intersections[0];
+
+      setNodes(nds => nds.map(n => {
+          if (n.id !== node.id) return n;
+
+          if (pocket) {
+              const pAbsX = (pocket as any).positionAbsolute?.x ?? pocket.position.x;
+              const pAbsY = (pocket as any).positionAbsolute?.y ?? pocket.position.y;
+              const nAbsX = (node as any).positionAbsolute?.x ?? node.position.x;
+              const nAbsY = (node as any).positionAbsolute?.y ?? node.position.y;
+              
+              if (n.parentId !== pocket.id) {
+                  return {
+                      ...n,
+                      parentId: pocket.id,
+                      position: { x: nAbsX - pAbsX, y: nAbsY - pAbsY }
+                  };
+              }
+          } else if (n.parentId) {
+              const nAbsX = (node as any).positionAbsolute?.x ?? node.position.x;
+              const nAbsY = (node as any).positionAbsolute?.y ?? node.position.y;
+              return {
+                  ...n,
+                  parentId: undefined,
+                  position: { x: nAbsX, y: nAbsY }
+              };
+          }
+          return n;
+      }));
+  }, [getIntersectingNodes]);
+
+  const sortedNodes = useMemo(() => {
+    return [...nodes].sort((a, b) => {
+        if (a.type === 'pocket' && b.type !== 'pocket') return -1;
+        if (a.type !== 'pocket' && b.type === 'pocket') return 1;
+        return 0;
+    });
+  }, [nodes]);
 
   // Кнопка «Создать/подключить COB» в ноде MIDI-трек (запрос 27.07): нода
   // шлёт событие lumina:wash-connect, а граф меняем только здесь — новой
@@ -1271,11 +1409,11 @@ const FlowWrapper: React.FC = () => {
           onAutoLayout={autoLayout}
         />
         <div className="flex-1 overflow-hidden relative">
-          <ReactFlow nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onNodesDelete={onNodesDelete} onConnect={onConnect} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onPaneContextMenu={(e) => handleContextMenu(e)} onNodeContextMenu={(e, n) => handleContextMenu(e, n)} onSelectionContextMenu={(e) => handleContextMenu(e)} onEdgeClick={onEdgeClick} fitView minZoom={0.1} onlyRenderVisibleElements={true} panOnDrag={isSpacePressed ? [0, 1, 2] : [1, 2]} selectionOnDrag={!isSpacePressed} nodesDraggable={!isSpacePressed} elementsSelectable={!isSpacePressed} selectionMode={SelectionMode.Partial} zoomOnScroll={true} panOnScroll={false} zoomOnPinch={true}>
+          <ReactFlow nodes={sortedNodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onNodesDelete={onNodesDelete} onConnect={onConnect} nodeTypes={nodeTypes} edgeTypes={edgeTypes} onPaneContextMenu={(e) => handleContextMenu(e)} onNodeContextMenu={(e, n) => handleContextMenu(e, n)} onSelectionContextMenu={(e) => handleContextMenu(e)} onEdgeClick={onEdgeClick} onNodeDragStop={onNodeDragStop} fitView minZoom={0.1} onlyRenderVisibleElements={true} panOnDrag={isSpacePressed ? [0, 1, 2] : [1, 2]} selectionOnDrag={!isSpacePressed} nodesDraggable={!isSpacePressed} elementsSelectable={!isSpacePressed} selectionMode={SelectionMode.Partial} zoomOnScroll={true} panOnScroll={false} zoomOnPinch={true}>
             <Controls /><Background />
             <Panel position="bottom-right" className="bg-zinc-900/80 p-2 rounded-lg border border-zinc-800 text-[9px] font-bold text-zinc-500">SPACE/MIDDLE/RIGHT-CLICK + DRAG TO PAN • HOLD ALT + CLICK EDGE TO CUT • ADD NODES FOR LOGIC</Panel>
           </ReactFlow>
-          {menu && <ContextMenu menu={menu} nodes={nodes} onClose={() => setMenu(null)} onAddNode={addNode} onDeleteNode={deleteNode} onAutoLayout={autoLayout} />}
+          {menu && <ContextMenu menu={menu} nodes={nodes} onClose={() => setMenu(null)} onAddNode={addNode} onDeleteNode={deleteNode} onAutoLayout={autoLayout} onGroupNodes={handleGroupNodes} onUngroupNode={handleUngroupNode} onUngroupAll={handleUngroupAll} />}
       <TiltSettings
         isOpen={tiltPanelOpen}
         onClose={() => setTiltPanelOpen(false)}

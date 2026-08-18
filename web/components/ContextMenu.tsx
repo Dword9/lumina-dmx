@@ -11,9 +11,12 @@ interface ContextMenuProps {
     onAddNode: (type: string, pos: { x: number, y: number }, data?: any) => void;
     onDeleteNode: (id: string) => void;
     onAutoLayout: (mode: 'smart') => void;
+    onGroupNodes?: () => void;
+    onUngroupNode?: (id: string) => void;
+    onUngroupAll?: (pocketId: string) => void;
 }
 
-const ContextMenu: React.FC<ContextMenuProps> = ({ menu, nodes, onClose, onAddNode, onDeleteNode, onAutoLayout }) => {
+const ContextMenu: React.FC<ContextMenuProps> = ({ menu, nodes, onClose, onAddNode, onDeleteNode, onAutoLayout, onGroupNodes, onUngroupNode, onUngroupAll }) => {
     const { screenToFlowPosition } = useReactFlow();
     const [showFixtures, setShowFixtures] = React.useState(false);
 
@@ -173,6 +176,25 @@ const ContextMenu: React.FC<ContextMenuProps> = ({ menu, nodes, onClose, onAddNo
                         onClose();
                     }}>Duplicate</div>
                     <div className="context-menu-item text-red-500" onClick={() => onDeleteNode(menu.nodeId!)}>Delete Node</div>
+                    
+                    {(() => {
+                        const node = nodes.find(n => n.id === menu.nodeId);
+                        return (
+                            <>
+                                {node?.type === 'pocket' && onUngroupAll && (
+                                    <div className="context-menu-item border-t border-zinc-800 mt-1 text-orange-400" onClick={() => { onUngroupAll(node.id); onClose(); }}>Ungroup All</div>
+                                )}
+                                {node?.parentId && onUngroupNode && (
+                                    <div className="context-menu-item border-t border-zinc-800 mt-1 text-orange-400" onClick={() => { onUngroupNode(node.id); onClose(); }}>Ungroup Node</div>
+                                )}
+                            </>
+                        );
+                    })()}
+                </>
+            )}
+            {!menu.nodeId && nodes.filter(n => n.selected).length > 0 && onGroupNodes && (
+                <>
+                    <div className="context-menu-item border-t border-zinc-800 mt-1" onClick={() => { onGroupNodes(); onClose(); }}>Сгруппировать</div>
                 </>
             )}
         </div>

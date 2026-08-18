@@ -48,6 +48,13 @@ xxx*.txt
 
 # --- backups ---
 DEV-NOTES_Back.7z
+*.7z
+*_back.md
+
+# --- python build artifacts ---
+dist/
+build/
+*.spec
 
 # --- dev-скриншоты webshot (тестовые артефакты) ---
 docs/dev/
