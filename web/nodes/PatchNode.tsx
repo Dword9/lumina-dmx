@@ -296,7 +296,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
   const expanded = !!params.expanded;
 
   const graphNodes = useStore((s: any) => s.nodes);
-  const { getNode, getZoom, setNodes } = useReactFlow();
+  const { getNode, getZoom, setNodes, screenToFlowPosition } = useReactFlow();
 
   const [bank, setBank] = useState<FixtureProfile[]>(() => loadFixtureBank());
   const [presets, setPresets] = useState<StagePreset[]>(() => loadStagePresets());
@@ -493,14 +493,29 @@ export const PatchNode = ({ data, id, selected }: any) => {
       debugLog.log('patch', `select ${f.uid} (ch ${f.start}, U${f.universe}, ${f.name})`);
     }
 
-    if (f.srcId && patchPos) {
-      // Teleport the corresponding node to the right of the PatchNode
+    if (f.srcId) {
+      const flowPos = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+      // Teleport the corresponding node slightly to the right of the cursor
       // Add a slight random offset so multiple clicked nodes don't stack perfectly
-      const rx = Math.random() * 40 - 20;
-      const ry = Math.random() * 40 - 20;
-      setNodes(nds => nds.map(n => n.id === f.srcId ? { ...n, position: { x: patchPos.x + 880 + rx, y: patchPos.y + 40 + ry } } : n));
+      const rx = Math.random() * 20 - 10;
+      const ry = Math.random() * 20 - 10;
+      setNodes(nds => {
+        const maxZ = nds.reduce((max, n) => Math.max(max, n.zIndex ?? 0), 0);
+        return nds.map(n => {
+          if (n.id === f.srcId) {
+            return { 
+              ...n, 
+              parentId: undefined, // Pull it out of the pocket
+              hidden: false,       // Make it visible
+              zIndex: Math.max(maxZ + 1, 100), // Stack on top of all nodes and previously called nodes
+              position: { x: flowPos.x + 30 + rx, y: flowPos.y - 20 + ry } 
+            };
+          }
+          return n;
+        });
+      });
     }
-  }, [patchPos, setNodes]);
+  }, [setNodes, screenToFlowPosition]);
 
   const setAddress = (v: string) => {
     const fid = [...sel][0];
