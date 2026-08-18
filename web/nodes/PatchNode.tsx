@@ -381,7 +381,7 @@ export const PatchNode = ({ data, id, selected }: any) => {
       if (n.id === id) {
         const nodeData = n.data as any;
         if (isExpanded) {
-          // Collapsing: save current dimensions and shrink
+          // Collapsing: save current height and shrink only height to 40
           return { 
             ...n, 
             data: { 
@@ -389,14 +389,13 @@ export const PatchNode = ({ data, id, selected }: any) => {
               params: { 
                 ...(nodeData?.params || {}), 
                 expanded: false, 
-                savedWidth: n.style?.width, 
                 savedHeight: n.style?.height 
               } 
             },
-            style: { ...n.style, width: 200, height: 40 }
+            style: { ...n.style, height: 40 }
           };
         } else {
-          // Expanding: restore dimensions or use default
+          // Expanding: restore saved height or use default
           return {
             ...n,
             data: { 
@@ -408,7 +407,6 @@ export const PatchNode = ({ data, id, selected }: any) => {
             },
             style: { 
               ...n.style, 
-              width: nodeData?.params?.savedWidth || 1300, 
               height: nodeData?.params?.savedHeight || 850 
             }
           };
