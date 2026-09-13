@@ -28,7 +28,6 @@ const ALLOWED_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
 let mainWindow = null;
 let tray = null;
 let isQuitting = false;
-let kkzCache = null; // cached KKZ light state, refreshed in background
 
 // ---------------------------------------------------------------------------
 // Window state persistence (position + size), no external deps
@@ -65,29 +64,6 @@ function saveSetting(key, value) {
     s[key] = value;
     fs.writeFileSync(settingsFile(), JSON.stringify(s));
   } catch { /* non-fatal */ }
-}
-
-// ---------------------------------------------------------------------------
-// KKZ: главный переключатель автоматов из трея (оба устройства).
-// URL/PIN и HTTP-клиент — общий модуль kkz-client.mjs (тот же, что в ноде
-// KkzNode.tsx и дефолтах App.tsx); armed-состояние живёт в браузере, трею
-// оно неизвестно — дёргаем оба автомата (решение 16.08).
-// ---------------------------------------------------------------------------
-const kkzClientPromise = import('./kkz-client.mjs');
-
-async function kkzSetPower(on) {
-  const kkz = await kkzClientPromise;
-  await kkz.kkzFetch(kkz.KKZ_URL, '/api/batch', {
-    method: 'POST',
-    body: { devices: [0, 1], on, source: 'tray' },
-  });
-}
-
-async function kkzGetStatus() {
-  const kkz = await kkzClientPromise;
-  const list = await kkz.kkzFetch(kkz.KKZ_URL, '/api/status');
-  // Свет «включён», если включён хотя бы один автомат
-  return Array.isArray(list) && list.some((d) => d.on);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,16 +145,7 @@ function createTray() {
   tray = new Tray(icon.isEmpty() ? nativeImage.createEmpty() : icon);
   tray.setToolTip('Lumina Control Center');
 
-  const buildMenu = (kkzOn) => Menu.buildFromTemplate([
-    {
-      // Один пункт-переключатель: подпись — текущее состояние, клик —
-      // инверсия. Статус тянется при каждом открытии меню (right-click),
-      // поэтому подпись всегда актуальна.
-      label: kkzOn === null ? 'KKZ свет ...' : (kkzOn ? 'KKZ свет: ВЫКЛ' : 'KKZ свет: ВКЛ'),
-      enabled: kkzOn !== null,
-      click: () => { kkzSetPower(!kkzOn).catch(() => {}); },
-    },
-    { type: 'separator' },
+  const buildMenu = () => Menu.buildFromTemplate([
     {
       label: 'Рестарт сервера',
       click: async () => {
@@ -201,22 +168,8 @@ function createTray() {
     { label: 'Выход', click: () => { isQuitting = true; app.quit(); } },
   ]);
 
-  // refresh the menu each time it opens (KKZ status + autostart checkbox)
-  const refreshMenu = async () => {
-    try { kkzCache = await kkzGetStatus(); } catch { kkzCache = null; }
-    tray.setContextMenu(buildMenu(kkzCache));
-  };
-  tray.setContextMenu(buildMenu(null));
+  tray.setContextMenu(buildMenu());
   tray.on('click', toggleWindow);
-  // Windows shows the currently-set menu on right-click; rebuild first so the
-  // KKZ item is always fresh on the FIRST click (not the second).
-  tray.on('right-click', async () => {
-    await refreshMenu();
-    tray.popUpContextMenu(buildMenu(kkzCache));
-  });
-  // Background refresh keeps the cached state warm even without menu opens.
-  setInterval(refreshMenu, 5000);
-  refreshMenu();
 }
 
 // ---------------------------------------------------------------------------

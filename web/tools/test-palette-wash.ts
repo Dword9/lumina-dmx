@@ -1,6 +1,5 @@
 /**
- * Тесты новых нод «Палитра COB» и «Трек» + входов цвета верхнего света
- * у midi-track (запросы юзера 27.07).
+ * Тесты MIDI-трека, COB wash и гейтов приборов.
  * Запуск: npx tsx tools/test-palette-wash.ts   (из папки web)
  */
 import { evaluateGraph, isWashFixture } from '../utils/graphEngine';
@@ -17,20 +16,6 @@ const checkTrue = (name: string, cond: boolean, extra = '') => {
   if (!cond) failed++;
 };
 
-const palette = (id: string, params: Record<string, unknown>): LuminaNode => ({
-  id, type: 'palette', position: { x: 0, y: 0 },
-  data: { label: 'Палитра', type: 'palette', params: { hue: 0, saturation: 1, ...params } },
-} as any);
-
-const gen = (id: string, value: number): LuminaNode => ({
-  id, type: 'generator', position: { x: 0, y: 0 },
-  data: { label: id, type: 'generator', params: value >= 255
-    ? { shape: 'square', speed: 0, discrete: false, _phase: 0, _lastTime: Date.now() }
-    : { shape: 'saw', speed: 0, discrete: false,
-        _phase: (Math.max(0, value) / 255) * 2 * Math.PI, _lastTime: Date.now() },
-  },
-} as any);
-
 const midiTrack = (id: string, params: Record<string, unknown>): LuminaNode => ({
   id, type: 'midi-track', position: { x: 0, y: 0 },
   data: { label: 'MIDI-трек', type: 'midi-track', params: {
@@ -43,48 +28,7 @@ const edge = (source: string, sourceHandle: string, target: string, targetHandle
 const run = (nodes: LuminaNode[], edges: LuminaEdge[] = []) =>
   evaluateGraph(nodes, edges, {}, {});
 
-console.log('--- 1. Палитра: свои ползунки → выходы 0-255 ---');
-{
-  const pal = palette('pal', { hue: 0.5, saturation: 1 });
-  const { nodeValues } = run([pal]);
-  check('out-0 = сдвиг 0.5*255', nodeValues['pal'][0], 128);
-  check('out-1 = насыщенность 100%', nodeValues['pal'][1], 255);
-  const d = (pal.data.params as any)._driven;
-  check('без входов ничто не driven', [d.hue, d.sat], [false, false]);
-}
-
-console.log('\n--- 2. Палитра: входы перебивают ползунки ---');
-{
-  const pal = palette('pal', { hue: 0.1, saturation: 0.2 });
-  const { nodeValues } = run([pal, gen('gh', 255), gen('gs', 128)],
-    [edge('gh', 'out-0', 'pal', 'hue-in'), edge('gs', 'out-0', 'pal', 'sat-in')]);
-  check('hue-in=255 → out-0=255', nodeValues['pal'][0], 255);
-  // Генератор speed=0 превращается в 120 BPM (0||120) и фаза дрейфует на
-  // пару миллисекунд — поэтому окно, а не точное 128. Главное: НЕ 51
-  // (ползунок 0.2*255), то есть вход реально перебил ползунок.
-  checkTrue('sat-in=128 → out-1 ≈128, не 51 с ползунка',
-    Math.abs(nodeValues['pal'][1] - 128) <= 4, `out-1=${nodeValues['pal'][1]}`);
-  const p = pal.data.params as any;
-  check('driven взведён', [p._driven.hue, p._driven.sat], [true, true]);
-  check('_effHue = 1', p._effHue, 1);
-  checkTrue('_effSat ≈ 0.5', Math.abs(p._effSat - 0.5) < 0.03, `sat=${p._effSat.toFixed(3)}`);
-}
-
-console.log('\n--- 3. midi-track: цвет COB от палитры через wash-hue/sat-in ---');
-{
-  const mt = midiTrack('mt', {});
-  const pal = palette('pal', { hue: 0.8, saturation: 0.4 });
-  run([mt, pal], [edge('pal', 'out-0', 'mt', 'wash-hue-in'), edge('pal', 'out-1', 'mt', 'wash-sat-in')]);
-  const p = mt.data.params as any;
-  check('_effWashHue от палитры (0.8)', Math.round(p._effWashHue * 100) / 100, 0.8);
-  check('_effWashSat от палитры (0.4)', Math.round(p._effWashSat * 100) / 100, 0.4);
-  check('driven.washHue/washSat', [p._driven.washHue, p._driven.washSat], [true, true]);
-  // Цвет лучей при этом остаётся СВОИМ (не от палитры COB)
-  check('лучи: свой hueShift 0.25', p._effHue, 0.25);
-  check('лучи: свой saturation 0.75', p._effSat, 0.75);
-}
-
-console.log('\n--- 4. midi-track: без палитры COB делит цвет с лучами ---');
+console.log('\n--- 1. midi-track: COB делит цвет с лучами ---');
 {
   const mt = midiTrack('mt', {});
   run([mt]);
@@ -94,7 +38,7 @@ console.log('\n--- 4. midi-track: без палитры COB делит цвет 
   check('driven сброшены', [p._driven.washHue, p._driven.washSat], [false, false]);
 }
 
-console.log('\n--- 5. Нода «Трек»: выход = готовность ---');
+console.log('\n--- 2. Нода «Трек»: выход = готовность ---');
 {
   const empty: LuminaNode = {
     id: 'tr', type: 'music-track', position: { x: 0, y: 0 },
@@ -114,7 +58,7 @@ console.log('\n--- 5. Нода «Трек»: выход = готовность -
   check('аудио+анализ → 255', run([readyTr]).nodeValues['tr'], [255]);
 }
 
-console.log('\n--- 6. Прибор заливки: led_par_8ch и кастом с его раскладкой ---');
+console.log('\n--- 3. Прибор заливки: led_par_8ch и кастом с его раскладкой ---');
 {
   check('тип led_par_8ch принят', isWashFixture({ fixtureType: 'led_par_8ch' }), true);
   check('типа custom без раскладки НЕ принят', isWashFixture({ fixtureType: 'custom' }), false);
@@ -134,7 +78,7 @@ console.log('\n--- 6. Прибор заливки: led_par_8ch и кастом �
   check('пустые params не падают', isWashFixture(undefined), false);
 }
 
-console.log('\n--- 7. Выход COB wash: провод out-2 → wash-in = гейт (27.07) ---');
+console.log('\n--- 4. Выход COB wash: провод out-2 → wash-in = гейт ---');
 const washFix = (id: string, ch: number): LuminaNode => ({
   id, type: 'fixture', position: { x: 0, y: 0 },
   data: { label: id, type: 'fixture', params: {
@@ -182,19 +126,19 @@ const washFix = (id: string, ch: number): LuminaNode => ({
   check('wash=off: структура всё равно видна', [p._washWired, p._washTotal], [1, 1]);
 }
 {
-  // 7.5 Выходов теперь четыре: энергия, мотор, мастер заливки, лучи
+  // Пять выходов: энергия, мотор, мастер заливки, лучи, конец трека.
   const mt = midiTrack('mt', {});
   const { nodeValues } = run([mt, washFix('w1', 200)]);
-  check('нет аудио → [0, 128, 0, 0]', nodeValues['mt'], [0, 128, 0, 0]);
+  check('нет аудио → [0, 128, 0, 0, 0]', nodeValues['mt'], [0, 128, 0, 0, 0]);
   const mtOff = midiTrack('mt', { stop: true });
   const res2 = run([mtOff]);
-  checkTrue('выключенная нода: четыре выхода, нули', res2.nodeValues['mt'].length === 4
+  checkTrue('выключенная нода: пять выходов, нули', res2.nodeValues['mt'].length === 5
     && res2.nodeValues['mt'][0] === 0 && res2.nodeValues['mt'][2] === 0
-    && res2.nodeValues['mt'][3] === 0,
+    && res2.nodeValues['mt'][3] === 0 && res2.nodeValues['mt'][4] === 0,
     `got=${JSON.stringify(res2.nodeValues['mt'])}`);
 }
 
-console.log('\n--- 8. Выход ЛУЧИ: провод out-3 → comb-in = гейт расчёсок (28.07) ---');
+console.log('\n--- 5. Выход ЛУЧИ: провод out-3 → comb-in = гейт расчёсок ---');
 const combFix = (id: string, ch: number): LuminaNode => ({
   id, type: 'fixture', position: { x: 0, y: 0 },
   data: { label: id, type: 'fixture', params: {
@@ -235,4 +179,4 @@ if (failed > 0) {
   console.log(`ПРОВАЛЕНО проверок: ${failed}`);
   process.exit(1);
 }
-console.log('Палитра, трек-нода и входы цвета COB работают');
+console.log('MIDI-трек, COB wash и гейты приборов работают');

@@ -18,7 +18,6 @@ const HTTP_PROTOCOL = (IS_HTTPS && !IS_LOCALHOST) ? 'https' : 'http';
 export const DEFAULT_WS_URL = `${WS_PROTOCOL}://${SERVER_HOST}:${SERVER_PORT}/ws`;
 export const HTTP_API_URL = `${HTTP_PROTOCOL}://${SERVER_HOST}:${SERVER_PORT}`;
 
-export const MAX_CHANNELS = 512;
 export const MAX_DMX_VALUE = 255;
 
 // --- Фундамент гашения (грабля «свет не гаснет», 24.07) ---

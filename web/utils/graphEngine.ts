@@ -68,7 +68,7 @@ const sortNodes = (nodes: LuminaNode[], edges: LuminaEdge[]): LuminaNode[] => {
       if (node) order.push(node);
   };
 
-  const startOrder = ['midi-track', 'comb-controller', 'input', 'music-track', 'palette', 'midi', 'group-activator', 'math', 'audio', 'generator', 'fixture'];
+  const startOrder = ['midi-track', 'comb-controller', 'input', 'music-track', 'midi', 'group-activator', 'math', 'audio', 'generator', 'fixture'];
   const sortedNodesStart = [...nodes].sort((a, b) => {
       const idxA = startOrder.indexOf(a.type as string);
       const idxB = startOrder.indexOf(b.type as string);
@@ -699,27 +699,6 @@ export const evaluateGraph = (
         break;
       }
 
-      case 'palette': {
-        // Палитра верхнего света: сдвиг/насыщенность с входами под LFO.
-        // Выходы 0-255: out-0 = сдвиг, out-1 = насыщенность.
-        const params = node.data.params || {};
-        const inVal = (handle: string): number | null => {
-          const vals = getInputsForHandle(node.id, handle, incomingEdgesByTarget, nodeValues, nodeMap);
-          if (vals.length === 0) return null;
-          return Math.max(...vals);
-        };
-        const inHue = inVal('hue-in');
-        const inSat = inVal('sat-in');
-        const hue = Math.max(0, Math.min(1, inHue !== null ? inHue / 255 : (params.hue ?? 0)));
-        const sat = Math.max(0, Math.min(1, inSat !== null ? inSat / 255 : (params.saturation ?? 1)));
-        // Для UI: подключённый вход перебивает ползунок — нода показывает факт
-        params._effHue = hue;
-        params._effSat = sat;
-        params._driven = { hue: inHue !== null, sat: inSat !== null };
-        outputs = [Math.round(hue * 255), Math.round(sat * 255)];
-        break;
-      }
-
       case 'midi-track': {
         // Реактивный свет: ноты трека -> 40 лучей расчёсок.
         // Ядро движка в utils/lightEngine.ts, транспорт в services/midiTrackManager.
@@ -730,8 +709,6 @@ export const evaluateGraph = (
 
         // Триггер «конец трека» (выход out-4): проигрывает endPattern
         // (0-255 по шагам v/ms) в последние endSeconds секунд, после окна — 0.
-        // KKZ-пульт: провод на master-in = мигание (по фронтам 0↔255),
-        // на off-in = одно выключение. 16.08: свет зала мигает последние 3 сек.
         const endSec = Math.max(0, params.endSeconds ?? 3);
         const endPattern = Array.isArray(params.endPattern) && params.endPattern.length
           ? params.endPattern
@@ -1148,7 +1125,7 @@ export const evaluateGraph = (
           Math.max(0, Math.min(255, Math.round(washMaster * 255))),
           // out-3 «ЛУЧИ»: по проводу — та же энергия кадра, что и out-0.
           Math.max(0, Math.min(255, Math.round(frame.energy * 40))),
-          // out-4 «Конец трека»: триггер для KKZ-пульта (0→255 за endSeconds).
+          // out-4 «Конец трека»: нейтральный триггер внешней автоматизации.
           endTrigger];
         break;
       }
@@ -1182,19 +1159,6 @@ export const evaluateGraph = (
           
           return val;
         });
-        break;
-      }
-
-      case 'kkz': {
-        // Входы пульта KKZ (управление с других нод — звук, таймер, LFO):
-        // значение — максимум по рёбрам на входе, -1 если вход не подключён.
-        // Нода сама детектит фронты 0↔1 и шлёт HTTP только при переходе.
-        // off-in (4-й) — триггер «выключить все автоматы» по фронту 0→255.
-        const readIn = (handle: string): number => {
-          const vals = getInputsForHandle(node.id, handle, incomingEdgesByTarget, nodeValues, nodeMap);
-          return vals.length ? Math.max(...vals) : -1;
-        };
-        outputs = [readIn('master-in'), readIn('dev-0-in'), readIn('dev-1-in'), readIn('off-in')];
         break;
       }
 
@@ -1283,14 +1247,6 @@ export const evaluateGraph = (
       }
   });
 
-  // Стаки (патч-нода): намеренные параллельные приборы на одних адресах
-  // (спаренные COB на 200 и т.п.) — для приборов из одного стака перекрытие
-  // каналов НЕ считается конфликтом.
-  const stackPatch = nodes.find(n => n.type === 'patch');
-  const stacks: string[][] = Array.isArray(stackPatch?.data?.params?.stacks)
-      ? stackPatch.data.params.stacks
-      : [];
-
   fixtures.forEach(node => {
       const start = node.data.params?.startChannel || 1;
       const fType = node.data.params?.fixtureType || 'dimmer';
@@ -1303,15 +1259,8 @@ export const evaluateGraph = (
           const claims = Number(node.data.params?.universe) === 2 ? channelClaims2 : channelClaims;
           for (let i = 0; i < layout.length; i++) {
               if (claims[start + i] && claims[start + i].length > 1) {
-                  const claimers = claims[start + i];
-                  const others = claimers.filter(c => c !== node.id);
-                  // Все конфликтующие приборы в одном и том же стаке — намеренный параллель
-                  const stackedTogether = others.length > 0 &&
-                      stacks.some(s => s.includes(node.id) && others.every(o => s.includes(o)));
-                  if (!stackedTogether) {
-                      hasConflict = true;
-                      break;
-                  }
+                  hasConflict = true;
+                  break;
               }
           }
       }
@@ -1319,7 +1268,7 @@ export const evaluateGraph = (
       if (hasConflict !== !!node.data.params?.hasConflict || isActive !== !!node.data.params?.isActive) {
           if (!node.data.params) node.data.params = {};
           if (hasConflict !== !!node.data.params?.hasConflict) {
-              debugLog.log('graph', `conflict ${hasConflict ? 'ON' : 'OFF'} ${node.id} (${node.data.params?.fixtureType}@${start}, groups=${node.data.params?.group}, stacked=${(node.data.params?.stackIds || []).length > 0})`);
+              debugLog.log('graph', `conflict ${hasConflict ? 'ON' : 'OFF'} ${node.id} (${node.data.params?.fixtureType}@${start}, groups=${node.data.params?.group})`);
           }
           node.data.params.hasConflict = hasConflict;
           node.data.params.isActive = isActive;

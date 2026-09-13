@@ -27,12 +27,8 @@ import { GeneratorNode } from './nodes/GeneratorNode';
 import { CombControllerNode } from './nodes/CombControllerNode';
 import { MidiTrackNode } from './nodes/MidiTrackNode';
 import { MusicTrackNode } from './nodes/MusicTrackNode';
-import { PaletteNode } from './nodes/PaletteNode';
-import { KkzNode } from './nodes/KkzNode';
-import { PatchNode } from './nodes/PatchNode';
 import { X32Node } from './nodes/X32Node';
 import { AimpNode } from './nodes/AimpNode';
-import { KKZ_URL, KKZ_PIN } from './electron/kkz-client.mjs';
 import ButtonEdge from './components/ButtonEdge';
 import Header from './components/Header';
 import Sidebar from './components/Sidebar';
@@ -72,9 +68,6 @@ const nodeTypes = {
   'comb-controller': memo(CombControllerNode),
   'midi-track': memo(MidiTrackNode),
   'music-track': memo(MusicTrackNode),
-  palette: memo(PaletteNode),
-  kkz: memo(KkzNode),
-  patch: memo(PatchNode),
   x32: memo(X32Node),
   aimp: memo(AimpNode)
 };
@@ -516,9 +509,7 @@ const FlowWrapper: React.FC = () => {
         type: node.data?.type || node.type || 'unknown',
         onChange: handleNodeValueChange,
         onParamChange: handleNodeParamChange,
-        onAudioLevelsUpdate: handleAudioLevelsUpdate,
-        onAddNode: addNode,
-        onDeleteNode: deleteNode
+        onAudioLevelsUpdate: handleAudioLevelsUpdate
       }
     };
   }, [handleAudioLevelsUpdate, handleNodeValueChange, handleNodeParamChange]);
@@ -1015,9 +1006,6 @@ const FlowWrapper: React.FC = () => {
     // что движок раньше подставлял фолбэками (тест эквивалентности).
     if (type === 'midi-track' && !initialData) defaultParams = { ...defaultMidiTrackParams() };
     if (type === 'music-track' && !initialData) defaultParams = { audioUrl: null, audioName: null, analysisUrl: null, analysisName: null, notes: 0, duration: 0 };
-    if (type === 'palette' && !initialData) defaultParams = { hue: 0, saturation: 1 };
-    if (type === 'kkz' && !initialData) defaultParams = { url: KKZ_URL, pin: KKZ_PIN, armed: [true, true], master: false };
-    if (type === 'patch' && !initialData) defaultParams = { expanded: false, stacks: [], groups: [] };
     if (type === 'x32' && !initialData) defaultParams = { host: '192.168.0.113' };
     if (type === 'aimp' && !initialData) defaultParams = { volume: 0.8 };
     // Новая нода появляется в ЦЕНТРЕ текущего экрана (запрос 11.09): раньше

@@ -12,7 +12,7 @@ import { MidiManager } from '../services/midiService';
  * физически едут), MASTER = Main LR. REST бриджа: /api/x32/* (server_v4).
  * Контракт пульта: N:\python_ide\X-32\X32_CONTRACT.md.
  *
- * v3 (09.09, вечер): входные хэндлы по образцу CombController/KKZ — у каждой
+ * Входные хэндлы по образцу остальных управляющих нод — у каждой
  * группы вход «N-in» (0..255), куда можно подключить любую ноду (MIDI-нода с
  * крыла, генератор, math). Значение вычисляет graphEngine (case 'x32'), нода
  * через renderRegistry получает outputs [mic..master] и шлёт на пульт только
