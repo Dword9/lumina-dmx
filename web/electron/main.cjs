@@ -242,6 +242,12 @@ async function createWindow(startHidden) {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // 10.09: окно живёт в трее, но НОДОВЫЙ ГРАФ крутится в этом рендерере
+      // (RAF-цикл в App.tsx). По умолчанию Chromium режет таймеры и гасит RAF
+      // в скрытом окне → нода X32 (и любой граф: midi-track, генераторы)
+      // молчала, пока приложение «на полке». Отключаем фоновый throttling —
+      // свет/звук должны играть из трея.
+      backgroundThrottling: false,
     },
   });
 

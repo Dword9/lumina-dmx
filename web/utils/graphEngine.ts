@@ -1197,6 +1197,39 @@ export const evaluateGraph = (
         outputs = [readIn('master-in'), readIn('dev-0-in'), readIn('dev-1-in'), readIn('off-in')];
         break;
       }
+
+      case 'x32': {
+        // Входы микшера звукача (X32): фейдеры групп MIC/AIMP/PC/VIDEO/MASTER.
+        // Значение с входа 0..255; нет связи → текущее значение слайдера ноды
+        // (params.faders[gid]), чтобы ручное управление не затиралось графом.
+        // Нода сама шлёт OSC на пульт через REST-бридж (X32Node.tsx).
+        const params = node.data.params || {};
+        const faders: Record<string, number> = params.faders || {};
+        const readIn = (handle: string, gid: string): number => {
+          const vals = getInputsForHandle(node.id, handle, incomingEdgesByTarget, nodeValues, nodeMap);
+          if (vals.length) return Math.max(...vals);
+          return Math.round((faders[gid] ?? 0) * 255);
+        };
+        outputs = [
+          readIn('mic-in', 'mic'),
+          readIn('aimp-in', 'aimp'),
+          readIn('pc-in', 'pc'),
+          readIn('video-in', 'video'),
+          readIn('master-in', 'master'),
+        ];
+        break;
+      }
+
+      case 'aimp': {
+        // Громкость плеера AIMP на этой машине: вход vol-in (0..255) → выход
+        // и отправка в Windows-микшер из ноды (AimpNode.tsx). Нет входа —
+        // значение ручного слайдера params.volume (0..1), чтобы ручное
+        // управление не затиралось графом.
+        const params = node.data.params || {};
+        const vals = getInputsForHandle(node.id, 'vol-in', incomingEdgesByTarget, nodeValues, nodeMap);
+        outputs = [vals.length ? Math.max(...vals) : Math.round((params.volume ?? 0.8) * 255)];
+        break;
+      }
     }
 
     nodeValues[node.id] = outputs;

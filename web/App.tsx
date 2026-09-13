@@ -30,6 +30,8 @@ import { MusicTrackNode } from './nodes/MusicTrackNode';
 import { PaletteNode } from './nodes/PaletteNode';
 import { KkzNode } from './nodes/KkzNode';
 import { PatchNode } from './nodes/PatchNode';
+import { X32Node } from './nodes/X32Node';
+import { AimpNode } from './nodes/AimpNode';
 import { KKZ_URL, KKZ_PIN } from './electron/kkz-client.mjs';
 import ButtonEdge from './components/ButtonEdge';
 import Header from './components/Header';
@@ -72,7 +74,9 @@ const nodeTypes = {
   'music-track': memo(MusicTrackNode),
   palette: memo(PaletteNode),
   kkz: memo(KkzNode),
-  patch: memo(PatchNode)
+  patch: memo(PatchNode),
+  x32: memo(X32Node),
+  aimp: memo(AimpNode)
 };
 
 const edgeTypes = {
@@ -161,7 +165,7 @@ const sanitizeGraph = (rawNodes: LuminaNode[], rawEdges: LuminaEdge[]) => {
 };
 
 const FlowWrapper: React.FC = () => {
-  const { fitView, getNodes } = useReactFlow();
+  const { fitView, getNodes, screenToFlowPosition } = useReactFlow();
   
   // -- State --
   const [nodes, setNodes] = useState<LuminaNode[]>([]);
@@ -582,6 +586,7 @@ const FlowWrapper: React.FC = () => {
              } catch (e) { return false; }
         },
         getDevices: () => midiManager.getDevices(),
+        getState: () => midiManager.getState(),
         getStatusString: () => midiManager.getStatusString(),
         send: (deviceId: string, data: number[]) => midiManager.send(deviceId, data),
         injectWingEvent: (kind: 'fader' | 'encoder' | 'button', id: number, value: number) => midiManager.injectWingEvent(kind, id, value)
@@ -1013,7 +1018,14 @@ const FlowWrapper: React.FC = () => {
     if (type === 'palette' && !initialData) defaultParams = { hue: 0, saturation: 1 };
     if (type === 'kkz' && !initialData) defaultParams = { url: KKZ_URL, pin: KKZ_PIN, armed: [true, true], master: false };
     if (type === 'patch' && !initialData) defaultParams = { expanded: false, stacks: [], groups: [] };
-    const newNode: LuminaNode = injectHandlers({ id, type, position: pos || { x: 100, y: 100 }, data: { label: initialData?.label || type.toUpperCase(), type, params: defaultParams } } as LuminaNode);
+    if (type === 'x32' && !initialData) defaultParams = { host: '192.168.0.113' };
+    if (type === 'aimp' && !initialData) defaultParams = { volume: 0.8 };
+    // Новая нода появляется в ЦЕНТРЕ текущего экрана (запрос 11.09): раньше
+    // дефолт (100,100) полотна оказывался «далеко за экраном»/под другой нодой.
+    // Явно переданную позицию (кнопки «создать кулисы/COB» рядом с треком)
+    // не трогаем.
+    const position = pos || screenToFlowPosition({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+    const newNode: LuminaNode = injectHandlers({ id, type, position, data: { label: initialData?.label || type.toUpperCase(), type, params: defaultParams } } as LuminaNode);
     debugLog.log('app', `add-node ${type} ${id} label="${initialData?.label || type.toUpperCase()}"`);
     setNodes(nds => [...nds, newNode]);
     setMenu(null);

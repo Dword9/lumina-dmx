@@ -132,7 +132,6 @@ python -m py_compile ../server_v4.py            # синтаксис серве�
 server_v4.py            — aiohttp-сервер: статика, WS/REST, Art-Net, крыло
 console_engine.py       — движок консольной модели пульта (сцены/мастера/ALT)
 console_slots.json      — слоты приборов для ALT-программера
-COB_5_v3.0.html         — веб-панель пульта (крыло-клон, деплой в Resolume)
 routing_store.json      — пресеты роутинга крыла (gitignored, рантайм)
 scenes_store.json       — сохранённые сцены (серверное депо)
 projects/               — сохранённые проекты (JSON-графы)

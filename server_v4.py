@@ -1132,6 +1132,144 @@ async def _m2m_idle_reaper() -> None:
             logging.warning("m2m reaper: %s", e)
 
 
+# ---------------- X32 OSC (нода X32, 09.09) ----------------
+# Контракт пультра: N:\python_ide\X-32\X32_CONTRACT.md. Управление группами
+# MIC/AIMP/PC/VIDEO через DCA (баланс каналов звукача сохраняется), MASTER
+# через /main/st.
+#
+# v2 (10.09): ФОНОВЫЙ ПОЛЛЕР. Грабля 10.09: при недоступном пульте каждый
+# /groups висел ~17с (11 OSC-вопросов × таймауты), поллинг ноды копил очередь
+# в executor'е — бридж казался мёртвым. Теперь: daemon-нить опрашивает пульт
+# раз в 3с и обновляет кэш; HTTP-эндпоинты отдают кэш МГНОВЕННО. SET (фейдер/
+# mute) — прямой UDP sendto без ожидания ответа, мгновенно всегда.
+
+_X32_CLIENT = None
+_X32_CACHE = {"ok": False, "info": "опрос не выполнялся", "groups": [], "ts": 0.0}
+_X32_LOCK = threading.Lock()
+
+def _x32():
+    global _X32_CLIENT
+    if _X32_CLIENT is None:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools", "x32"))
+        from x32_osc import X32Client
+        _X32_CLIENT = X32Client(
+            host=os.environ.get("X32_HOST", "192.168.0.113"))
+    return _X32_CLIENT
+
+
+def _x32_poll_loop():
+    """Фоновый опрос пульта: ping → сразу в кэш (быстрый отказ), groups →
+    медленный путь (до ~17с при мёртвой сети), но никому не мешает."""
+    while True:
+        try:
+            c = _x32()
+            ping = c.ping()
+            with _X32_LOCK:
+                _X32_CACHE["ok"] = bool(ping.get("ok"))
+                _X32_CACHE["info"] = ping.get("info", "")
+        except Exception as e:
+            with _X32_LOCK:
+                _X32_CACHE["ok"] = False
+                _X32_CACHE["info"] = str(e)
+        try:
+            g = _x32().groups()
+            with _X32_LOCK:
+                _X32_CACHE["groups"] = g
+                _X32_CACHE["ts"] = time.time()
+        except Exception:
+            pass
+        time.sleep(3)
+
+
+async def x32_status_api(request: web.Request):
+    """/api/x32/status — состояние из кэша поллера, мгновенно."""
+    with _X32_LOCK:
+        return web.json_response({"ok": _X32_CACHE["ok"], "info": _X32_CACHE["info"]})
+
+
+async def x32_groups_api(request: web.Request):
+    """/api/x32/groups — группы из кэша поллера, мгновенно."""
+    with _X32_LOCK:
+        return web.json_response({"ok": True, "groups": _X32_CACHE["groups"]})
+
+
+async def x32_fader_api(request: web.Request):
+    """/api/x32/fader POST {group, value} — двигать фейдер группы (0..1)."""
+    try:
+        body = await request.json()
+        gid = str(body.get("group", ""))
+        value = float(body.get("value", 0))
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad body"}, status=400)
+    loop = asyncio.get_event_loop()
+    try:
+        v = await loop.run_in_executor(None, _x32().set_fader, gid, value)
+        return web.json_response({"ok": True, "group": gid, "value": v})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=200)
+
+
+async def x32_on_api(request: web.Request):
+    """/api/x32/on POST {group, on:bool} — mute/unmute группы."""
+    try:
+        body = await request.json()
+        gid = str(body.get("group", ""))
+        on = bool(body.get("on", True))
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad body"}, status=400)
+    loop = asyncio.get_event_loop()
+    try:
+        v = await loop.run_in_executor(None, _x32().set_on, gid, on)
+        return web.json_response({"ok": True, "group": gid, "on": v})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=200)
+# ---------------- /X32 OSC ----------------
+
+# ---------------- /AIMP (локальный плеер) ----------------
+# Громкость AIMP на этой машине (Windows Core Audio, tools/aimp/aimp_volume.py)
+# для ноды AIMP: вход/фейдер 0..255 → 0..1. Без зависимостей (ctypes).
+# Сессия ищется по процессу aimp.exe; «не найдена» = AIMP ещё не играл с
+# момента запуска Windows (штатный статус, не ошибка).
+
+_AIMP = None
+
+
+def _aimp():
+    global _AIMP
+    if _AIMP is None:
+        import sys as _sys
+        _sys.path.insert(0, os.path.join(os.path.dirname(__file__), "tools", "aimp"))
+        import aimp_volume
+        _AIMP = aimp_volume
+    return _AIMP
+
+
+async def aimp_status_api(request: web.Request):
+    """/api/aimp/status — сессия AIMP найдена? текущая громкость 0..1."""
+    loop = asyncio.get_event_loop()
+    try:
+        st = await loop.run_in_executor(None, _aimp().get_status)
+        return web.json_response({"ok": True, **st})
+    except Exception as e:
+        return web.json_response({"ok": False, "found": False, "error": str(e)}, status=200)
+
+
+async def aimp_volume_api(request: web.Request):
+    """/api/aimp/volume POST {value: 0..1} — установить громкость AIMP."""
+    try:
+        body = await request.json()
+        value = float(body.get("value", 0))
+    except Exception:
+        return web.json_response({"ok": False, "error": "bad body"}, status=400)
+    loop = asyncio.get_event_loop()
+    try:
+        res = await loop.run_in_executor(None, _aimp().set_volume, value)
+        return web.json_response(res)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=200)
+
+
 async def engine_state_api(request: web.Request):
     """Состояние нейросети анализа для ноды ТРЕК: cold/starting/warm."""
     alive = await _m2m_alive_fast()
@@ -2754,6 +2892,11 @@ async def on_startup(app: web.Application):
         asyncio.create_task(_dmx_dump_loop(app))
     # Часовой репер простоя music2midi: выгружает модель из VRAM
     app["m2m_reaper"] = asyncio.create_task(_m2m_idle_reaper())
+    # X32: фоновый опросник пульта (кэш для /api/x32/status|groups).
+    # ГРАБЛЯ 12.09: функцию _x32_poll_loop определили, но поток НИГДЕ не
+    # стартовали — кэш оставался «опрос не выполнялся», нода X32 вечно
+    # красная «нет связи», хотя прямые UDP-отправки (фейдеры) работали.
+    threading.Thread(target=_x32_poll_loop, daemon=True, name="x32-poll").start()
     if not IS_SERVICE:
         webbrowser.open(f"http://localhost:{PORT}")
 
@@ -2781,6 +2924,14 @@ def create_app() -> web.Application:
     app.router.add_get("/api/calibration", calibration_handler)
     app.router.add_post("/api/calibration", calibration_save_handler)
     app.router.add_post("/debug-log", debug_log_handler)
+
+    # X32 (нода X32)
+    app.router.add_get("/api/x32/status", x32_status_api)
+    app.router.add_get("/api/x32/groups", x32_groups_api)
+    app.router.add_post("/api/x32/fader", x32_fader_api)
+    app.router.add_post("/api/x32/on", x32_on_api)
+    app.router.add_get("/api/aimp/status", aimp_status_api)
+    app.router.add_post("/api/aimp/volume", aimp_volume_api)
     
     # API для проектов
     app.router.add_get("/api/projects", list_projects)

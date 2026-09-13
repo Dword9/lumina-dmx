@@ -93,6 +93,7 @@ declare global {
       isReady: boolean;
       init: () => Promise<boolean>;
       getDevices: () => { id: string; name: string }[];
+      getState?: () => MidiState;
       getStatusString?: () => string;
       send: (deviceId: string, data: number[]) => void;
       /** События USB-крыла (fader/encoder/button) в MIDI-пайплайн */

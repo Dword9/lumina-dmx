@@ -14,6 +14,12 @@ export class MidiManager {
   public accessMode: 'sysex' | 'basic' | 'none' = 'none';
   private _lastDeviceCount: number = -1;
   private isInitializing = false;
+  /** Накопитель мелких отклонений для мёртвой зоны (см. handleMidiMessage) */
+  private noiseAcc: Record<string, number> = {};
+
+  /** Мёртвая зона шума MIDI-фейдеров, единиц DMX 0..255 (12.09, «хруст» X32).
+   *  Изменяемая на лету: нода AIMP даёт юзеру поле «Фильтр шума». */
+  public static MIDI_DEADBAND = 6;
 
   constructor() {
     this.handleMidiMessage = this.handleMidiMessage.bind(this);
@@ -144,10 +150,35 @@ export class MidiManager {
     }
 
     if (type) {
-      const dmxValue = Math.floor((value / 127) * 255);
+      const dmxRaw = Math.floor((value / 127) * 255);
       const stableIndex = type === 'pitch' ? 0 : data1;
       const baseKey = `${channel}-${type}-${stableIndex}`;
-      
+      let dmxValue = dmxRaw;
+
+      // Мёртвая зона с накоплением (12.09): Bluetooth-фейдеры шумят ±1-2
+      // единицы — этот шум раньше летел дальше и дёргал моторизованный фейдер
+      // X32 (aimp-in, «хруст») и громкость AIMP. Отклонение от последнего
+      // значения копится: шум < MIDI_DEADBAND не проходит вовсе, а медленный
+      // РЕАЛЬНЫЙ дрейф суммируется и проходит квантованными шагами (без
+      // «липкости»). В режиме learn фильтр отключён — обучение видит сырое.
+      const devKey = `${deviceId}__${baseKey}`;
+      const prev = this.state[devKey];
+      // MIDI_DEADBAND = 0 — фильтр выключен (раньше здесь было деление на
+      // ноль: Infinity * 0 = NaN отравлял состояние, фейдеры «залипали»).
+      if (this.learnCallback === null && type !== 'note' && prev !== undefined && MidiManager.MIDI_DEADBAND > 0) {
+        const db = Math.max(1, MidiManager.MIDI_DEADBAND);
+        const acc = (this.noiseAcc[devKey] ?? 0) + (dmxRaw - prev);
+        if (Math.abs(acc) < db) return;
+        let nv = prev + Math.sign(acc) * Math.floor(Math.abs(acc) / db) * db;
+        nv = acc > 0 ? Math.min(nv, dmxRaw) : Math.max(nv, dmxRaw);
+        this.noiseAcc[devKey] = dmxRaw - nv;
+        dmxValue = nv;
+      } else {
+        this.noiseAcc[devKey] = 0;
+      }
+      // страховка: нечисловое значение не должно попасть в состояние
+      if (!isFinite(dmxValue)) return;
+
       // Update State
       this.state[`${deviceId}__${baseKey}`] = dmxValue;
       this.state[`ALL__${baseKey}`] = dmxValue;
@@ -255,5 +286,6 @@ export class MidiManager {
     this.isReady = false;
     this.isInitializing = false;
     this._lastDeviceCount = -1;
+    this.noiseAcc = {};
   }
 }
